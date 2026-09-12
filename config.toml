@@ -33,7 +33,13 @@ exclude_dirs = [
     "target",
 ]
 
-# Paths relative to scan_root, pruned wholesale.
-# driftless-int is a near-identical untracked copy of driftless; indexing both
-# produces duplicate chunks and ambiguous citations.
-exclude_paths = ["SIH/driftless-int"]
+# Paths relative to scan_root, pruned wholesale. Each entry is a directory or a
+# single file.
+#   driftless-int  - near-identical untracked copy of driftless; indexing both
+#                    produces duplicate chunks and ambiguous citations.
+#   CLAUDE_SUMMARY - this tool's own session changelog, not project content, and
+#                    it grows every session.
+exclude_paths = [
+    "SIH/driftless-int",
+    "Second Brain/CLAUDE_SUMMARY.md",
+]

@@ -47,7 +47,11 @@ DEFAULT_EXCLUDE_DIRS: tuple[str, ...] = (
     "target",
 )
 
-DEFAULT_EXCLUDE_PATHS: tuple[str, ...] = ("SIH/driftless-int",)
+# Directories or single files, relative to the scan root.
+DEFAULT_EXCLUDE_PATHS: tuple[str, ...] = (
+    "SIH/driftless-int",
+    "Second Brain/CLAUDE_SUMMARY.md",
+)
 
 _LIST_FIELDS = ("include_patterns", "include_dirs", "exclude_dirs", "exclude_paths")
 
