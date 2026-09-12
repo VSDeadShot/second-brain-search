@@ -142,3 +142,27 @@ def test_bare_spec_and_brief_names_match(tmp_path: Path) -> None:
     names = {d.path.name for d in discover_documents(config_for(root))}
 
     assert names == {"SPEC.md", "BRIEF.md", "other-SPEC.md"}
+
+
+def test_exclude_paths_can_name_a_single_file(tmp_path: Path) -> None:
+    """Not every exclusion is a directory - the tool's own changelog is one file."""
+    root = tmp_path / "root"
+    proj = make_git_dir(root / "Proj")
+    make_file(proj / "README.md")
+    make_file(proj / "CLAUDE_SUMMARY.md")
+
+    docs = discover_documents(config_for(root, exclude_paths=("Proj/CLAUDE_SUMMARY.md",)))
+
+    assert {d.path.name for d in docs} == {"README.md"}
+
+
+def test_excluding_a_file_leaves_its_siblings_alone(tmp_path: Path) -> None:
+    """Excluding one file must not prune the directory holding it."""
+    root = tmp_path / "root"
+    proj = make_git_dir(root / "Proj")
+    make_file(proj / "docs" / "keep.md")
+    make_file(proj / "docs" / "drop.md")
+
+    docs = discover_documents(config_for(root, exclude_paths=("Proj/docs/drop.md",)))
+
+    assert {d.path.name for d in docs} == {"keep.md"}

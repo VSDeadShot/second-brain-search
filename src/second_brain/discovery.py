@@ -60,6 +60,7 @@ def discover_documents(config: Config) -> list[DiscoveredDoc]:
     scan_root = config.scan_root.resolve()
     include_dirs = frozenset(d.lower() for d in config.include_dirs)
     exclude_dirs = frozenset(d.lower() for d in config.exclude_dirs)
+    # Resolved once; matched against both pruned directories and individual files.
     excluded = {(scan_root / p).resolve() for p in config.exclude_paths}
 
     git_cache: dict[Path, Path | None] = {}
@@ -94,7 +95,9 @@ def discover_documents(config: Config) -> list[DiscoveredDoc]:
                 continue
 
             path = (current / filename).resolve()
-            if path in found:
+            # exclude_paths entries name either a directory (pruned above) or a
+            # single file, which only this check can catch.
+            if path in excluded or path in found:
                 continue
 
             git_root = _nearest_git_root(current, scan_root, git_cache)
