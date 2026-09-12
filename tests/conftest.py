@@ -60,3 +60,24 @@ def tree(tmp_path: Path) -> Path:
     make_file(root / "Skipped" / "sub" / "README.md")
 
     return root
+
+
+@pytest.fixture
+def doc_factory(tmp_path: Path):
+    """Build a DiscoveredDoc without needing a real discovery walk."""
+    from second_brain.discovery import DiscoveredDoc
+
+    def make(rel_path: str = "README.md", project: str = "Proj") -> DiscoveredDoc:
+        root = tmp_path / project
+        path = root / rel_path
+        make_file(path)
+        return DiscoveredDoc(
+            path=path,
+            project=project,
+            project_root=root,
+            rel_path=rel_path,
+            size_bytes=path.stat().st_size,
+            mtime=path.stat().st_mtime,
+        )
+
+    return make
