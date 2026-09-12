@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- second-brain-search ---
+# Session handoff changelog (per AGENTS.md, gitignored)
+CLAUDE_SUMMARY.md
+# Local vector store / index data
+.chroma/
+data/
+# Machine-local config override
+config.local.toml

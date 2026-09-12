@@ -1,0 +1,39 @@
+# Non-secret discovery settings. Committed on purpose - secrets live in .env.
+# A gitignored config.local.toml overrides anything here.
+
+[discovery]
+# Exact names and globs (case-insensitive) of documentation worth indexing.
+include_patterns = [
+    "README.md",
+    "CLAUDE_SUMMARY.md",
+    "PROJECT_STATUS.md",
+    "CLAUDE.md",
+    "AGENTS*.md",
+    "DECISIONS.md",
+    "ROADMAP.md",
+    "HANDOVER.md",
+    "EXPLAINER.md",
+    "*BRIEF.md",
+    "*SPEC.md",
+    "AI_*.md",
+]
+
+# Every *.md anywhere beneath a directory with one of these names is included.
+# Catches docs/superpowers/specs/*.md, which a literal docs/specs/*.md glob misses.
+include_dirs = ["docs"]
+
+# Directory names pruned at any depth. Dot-directories (.git, .venv,
+# .pytest_cache, ...) are always pruned as a class and need no entry here.
+exclude_dirs = [
+    "node_modules",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    "target",
+]
+
+# Paths relative to scan_root, pruned wholesale.
+# driftless-int is a near-identical untracked copy of driftless; indexing both
+# produces duplicate chunks and ambiguous citations.
+exclude_paths = ["SIH/driftless-int"]
