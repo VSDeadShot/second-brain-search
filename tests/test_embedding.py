@@ -8,12 +8,15 @@ import os
 import pytest
 
 from second_brain.embedding import (
+    EMBEDDING_MODEL,
     FREE_TIER_ITEMS_PER_MINUTE,
     PACING_WINDOW_SECONDS,
     RATE_LIMIT_MARGIN_SECONDS,
+    DailyQuotaExceeded,
     EmbeddingError,
     GeminiEmbedder,
     estimate_embedding_seconds,
+    gemini_cache_namespace,
 )
 
 from fakes import (
@@ -23,6 +26,7 @@ from fakes import (
     StubEmbedding,
     StubModels,
     StubResponse,
+    daily_quota_error,
     rate_limit_error,
 )
 
@@ -294,6 +298,104 @@ def test_persistent_rate_limiting_gives_up_with_the_quota_message() -> None:
 
     with pytest.raises(EmbeddingError, match="429"):
         embedder.embed_documents(texts(1))
+
+
+# --- daily quota ----------------------------------------------------------------
+
+
+def test_daily_quota_fails_immediately_without_retrying() -> None:
+    """The live 429 still carried retryDelay 58s; two 59s waits bought nothing."""
+    models, clock = StubModels(raise_queue=[daily_quota_error()]), FakeClock()
+    embedder = paced_embedder(models, clock, max_retries=3)
+
+    with pytest.raises(DailyQuotaExceeded):
+        embedder.embed_documents(texts(1))
+
+    assert len(models.calls) == 1
+    assert clock.sleeps == []
+
+
+def test_daily_quota_message_names_the_limit_and_when_it_resets() -> None:
+    embedder = paced_embedder(StubModels(raise_queue=[daily_quota_error()]), FakeClock())
+
+    with pytest.raises(DailyQuotaExceeded) as exc_info:
+        embedder.embed_documents(texts(1))
+
+    message = str(exc_info.value)
+    assert "1000" in message
+    assert "daily" in message
+    assert "midnight Pacific" in message
+
+
+def test_daily_quota_is_an_embedding_error() -> None:
+    """So every caller that already handles EmbeddingError handles this too."""
+    assert issubclass(DailyQuotaExceeded, EmbeddingError)
+
+
+def test_per_minute_quota_is_still_waited_out() -> None:
+    models, clock = StubModels(raise_queue=[rate_limit_error("45s")]), FakeClock()
+
+    paced_embedder(models, clock).embed_documents(texts(1))
+
+    assert clock.sleeps == [45.0 + RATE_LIMIT_MARGIN_SECONDS]
+
+
+def test_daily_quota_mid_run_stops_before_the_next_batch() -> None:
+    models = StubModels(raise_on_calls={3: daily_quota_error()})
+    embedder = paced_embedder(models, FakeClock(), items_per_minute=100)
+
+    with pytest.raises(DailyQuotaExceeded):
+        embedder.embed_documents(texts(500))
+
+    assert len(models.calls) == 3
+
+
+# --- per-batch results, for saving as they arrive -------------------------------
+
+
+def test_each_batch_is_handed_over_as_soon_as_it_returns() -> None:
+    models = StubModels()
+    received: list[tuple[int, int]] = []
+
+    paced_embedder(models, FakeClock(), items_per_minute=100).embed_documents(
+        texts(250), on_embedded=lambda offset, vectors: received.append((offset, len(vectors)))
+    )
+
+    assert received == [(0, 100), (100, 100), (200, 50)]
+
+
+def test_batches_before_a_failure_have_already_been_handed_over() -> None:
+    """What makes resuming possible: batches 1-2 are saved before batch 3 fails."""
+    models = StubModels(raise_on_calls={3: daily_quota_error()})
+    received: list[int] = []
+
+    with pytest.raises(DailyQuotaExceeded):
+        paced_embedder(models, FakeClock(), items_per_minute=100).embed_documents(
+            texts(500), on_embedded=lambda offset, vectors: received.append(offset)
+        )
+
+    assert received == [0, 100]
+
+
+def test_handed_over_vectors_are_the_normalised_ones() -> None:
+    received: list[list[float]] = []
+
+    paced_embedder(StubModels(dimensions=4), FakeClock()).embed_documents(
+        texts(1), on_embedded=lambda offset, vectors: received.extend(vectors)
+    )
+
+    assert l2_norm(received[0]) == pytest.approx(1.0)
+
+
+# --- cache namespace ------------------------------------------------------------
+
+
+def test_cache_namespace_identifies_model_dimensions_and_task() -> None:
+    embedder = make_embedder(StubModels(dimensions=4), dimensions=4)
+
+    assert embedder.cache_namespace == gemini_cache_namespace(EMBEDDING_MODEL, 4)
+    assert gemini_cache_namespace(EMBEDDING_MODEL, 768) != gemini_cache_namespace(EMBEDDING_MODEL, 3072)
+    assert gemini_cache_namespace("model-a", 768) != gemini_cache_namespace("model-b", 768)
 
 
 # --- progress -------------------------------------------------------------------

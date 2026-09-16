@@ -8,6 +8,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 BatchCallback = Callable[[int, int], None]
+EmbeddedCallback = Callable[[int, list[list[float]]], None]
+
+# Quota ids exactly as the live API reported them on 2026-09-16.
+PER_MINUTE_QUOTA_ID = "EmbedContentRequestsPerMinutePerUserPerProjectPerModel-FreeTier"
+PER_DAY_QUOTA_ID = "EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier"
 
 
 class FakeEmbedder:
@@ -21,6 +26,10 @@ class FakeEmbedder:
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def cache_namespace(self) -> str:
+        return f"fake|{self._dimensions}"
+
     def _vector(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         raw = [digest[i % len(digest)] / 255.0 for i in range(self._dimensions)]
@@ -28,23 +37,45 @@ class FakeEmbedder:
         return [v / norm for v in raw]
 
     def embed_documents(
-        self, texts: Sequence[str], *, on_batch: BatchCallback | None = None
+        self,
+        texts: Sequence[str],
+        *,
+        on_batch: BatchCallback | None = None,
+        on_embedded: EmbeddedCallback | None = None,
     ) -> list[list[float]]:
         items = list(texts)
         self.embed_calls.append(items)
-        if items and on_batch is not None:
+        if not items:
+            return []
+        if on_batch is not None:
             on_batch(1, 1)
-        return [self._vector(t) for t in items]
+        vectors = [self._vector(t) for t in items]
+        if on_embedded is not None:
+            on_embedded(0, vectors)
+        return vectors
 
     def embed_query(self, text: str) -> list[float]:
         return self._vector(text)
 
 
 class FailingEmbedder(FakeEmbedder):
-    """Fails the way a quota error or bad key would: at the embed call."""
+    """Fails the way a quota error or bad key would: at the embed call.
+
+    Has its own cache namespace. Sharing FakeEmbedder's would let a previous
+    fake run's saved vectors satisfy every text, so the failing call would never
+    be made and a test simulating an outage would silently test nothing.
+    """
+
+    @property
+    def cache_namespace(self) -> str:
+        return f"failing|{self._dimensions}"
 
     def embed_documents(
-        self, texts: Sequence[str], *, on_batch: BatchCallback | None = None
+        self,
+        texts: Sequence[str],
+        *,
+        on_batch: BatchCallback | None = None,
+        on_embedded: EmbeddedCallback | None = None,
     ) -> list[list[float]]:
         from second_brain.embedding import EmbeddingError
 
@@ -66,15 +97,24 @@ class FakeClock:
         self.now += seconds
 
 
-def rate_limit_error(retry_delay: str | None = "45s") -> Exception:
-    """A real google-genai ClientError, shaped like the 429 the live run received."""
+def rate_limit_error(
+    retry_delay: str | None = "45s",
+    *,
+    quota_id: str = PER_MINUTE_QUOTA_ID,
+    quota_value: str = "100",
+) -> Exception:
+    """A real google-genai ClientError, shaped like the 429s the live runs received."""
     from google.genai import errors
 
     details: list[dict] = [
         {
             "@type": "type.googleapis.com/google.rpc.QuotaFailure",
             "violations": [
-                {"quotaMetric": "generativelanguage.googleapis.com/embed_content_free_tier_requests"}
+                {
+                    "quotaMetric": "generativelanguage.googleapis.com/embed_content_free_tier_requests",
+                    "quotaId": quota_id,
+                    "quotaValue": quota_value,
+                }
             ],
         }
     ]
@@ -94,6 +134,12 @@ def rate_limit_error(retry_delay: str | None = "45s") -> Exception:
     )
 
 
+def daily_quota_error() -> Exception:
+    """The second live run's failure: the daily cap. Note the server still sent a
+    58s retryDelay - waiting it out cannot help."""
+    return rate_limit_error("58s", quota_id=PER_DAY_QUOTA_ID, quota_value="1000")
+
+
 @dataclass
 class StubEmbedding:
     values: list[float]
@@ -109,12 +155,15 @@ class StubModels:
     """Stands in for genai.Client().models - records calls, replays scripted results.
 
     `raise_queue` errors are raised one per call, in order, before any success.
+    `raise_on_calls` raises on specific call numbers (1-based) - e.g. a quota
+    error on the third batch after two good ones.
     With a `clock`, each call's start time is recorded and `latency` seconds pass.
     """
 
     dimensions: int = 4
     failures_before_success: int = 0
     raise_queue: list[Exception] = field(default_factory=list)
+    raise_on_calls: dict[int, Exception] = field(default_factory=dict)
     clock: FakeClock | None = None
     latency: float = 0.0
     calls: list[dict] = field(default_factory=list)
@@ -127,6 +176,8 @@ class StubModels:
             self.call_times.append(self.clock.now)
             self.clock.now += self.latency
 
+        if len(self.calls) in self.raise_on_calls:
+            raise self.raise_on_calls[len(self.calls)]
         if self.raise_queue:
             raise self.raise_queue.pop(0)
         if self._failed < self.failures_before_success:

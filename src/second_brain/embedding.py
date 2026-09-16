@@ -37,10 +37,42 @@ PACING_WINDOW_SECONDS = 60
 RATE_LIMIT_MARGIN_SECONDS = 1.0
 
 BatchCallback = Callable[[int, int], None]
+# (offset into the input texts, normalised vectors for that batch)
+EmbeddedCallback = Callable[[int, list[list[float]]], None]
 
 
 class EmbeddingError(Exception):
     """The embedding backend failed, or returned something unusable."""
+
+
+class DailyQuotaExceeded(EmbeddingError):
+    """The per-day quota is used up. Retrying within the day cannot succeed."""
+
+
+def gemini_cache_namespace(model: str, dimensions: int) -> str:
+    """Identifies a vector space: saved vectors are only reusable within one."""
+    return f"{model}|{dimensions}|{TASK_DOCUMENT}"
+
+
+def _daily_quota_limit(exc: Exception) -> str | None:
+    """The daily limit (e.g. "1000") if `exc` is a per-day quota 429, else None.
+
+    The live per-day 429 still carried a ~58s RetryInfo delay, so the retry
+    delay cannot tell the two apart - the QuotaFailure quotaId can
+    ("...PerDay..." vs "...PerMinute...").
+    """
+    if getattr(exc, "code", None) != 429:
+        return None
+
+    body = getattr(exc, "details", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    for detail in error.get("details", []) if isinstance(error, dict) else []:
+        if not isinstance(detail, dict) or not str(detail.get("@type", "")).endswith("QuotaFailure"):
+            continue
+        for violation in detail.get("violations", []):
+            if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
+                return str(violation.get("quotaValue") or "the daily")
+    return None
 
 
 def _normalise(vector: list[float]) -> list[float]:
@@ -99,8 +131,15 @@ class Embedder(Protocol):
     @property
     def dimensions(self) -> int: ...
 
+    @property
+    def cache_namespace(self) -> str: ...
+
     def embed_documents(
-        self, texts: Sequence[str], *, on_batch: BatchCallback | None = None
+        self,
+        texts: Sequence[str],
+        *,
+        on_batch: BatchCallback | None = None,
+        on_embedded: EmbeddedCallback | None = None,
     ) -> list[list[float]]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -158,6 +197,10 @@ class GeminiEmbedder:
     def dimensions(self) -> int:
         return self._dimensions
 
+    @property
+    def cache_namespace(self) -> str:
+        return gemini_cache_namespace(self._model, self._dimensions)
+
     def _config(self, task_type: str) -> Any:
         from google.genai import types
 
@@ -185,6 +228,13 @@ class GeminiEmbedder:
                     config=self._config(task_type),
                 )
             except Exception as exc:  # the SDK raises a family of transport errors
+                daily_limit = _daily_quota_limit(exc)
+                if daily_limit is not None:
+                    raise DailyQuotaExceeded(
+                        f"Gemini's free-tier daily limit of {daily_limit} embedded texts is "
+                        "used up. It resets at midnight Pacific time - run `sbs index` again "
+                        "after that."
+                    ) from exc
                 last_error = exc
                 if attempt < self._max_retries:
                     server_delay = _rate_limit_delay(exc)
@@ -206,8 +256,14 @@ class GeminiEmbedder:
         ) from last_error
 
     def embed_documents(
-        self, texts: Sequence[str], *, on_batch: BatchCallback | None = None
+        self,
+        texts: Sequence[str],
+        *,
+        on_batch: BatchCallback | None = None,
+        on_embedded: EmbeddedCallback | None = None,
     ) -> list[list[float]]:
+        """`on_embedded(offset, vectors)` fires as each batch returns, so a caller
+        can save results before a later batch fails."""
         items = list(texts)
         if not items:
             return []
@@ -223,7 +279,10 @@ class GeminiEmbedder:
                 on_batch(number, len(batches))
             if number > 1:
                 self._wait_for_next_window()
-            vectors.extend(self._embed_batch(batch, TASK_DOCUMENT))
+            batch_vectors = self._embed_batch(batch, TASK_DOCUMENT)
+            if on_embedded is not None:
+                on_embedded(len(vectors), batch_vectors)
+            vectors.extend(batch_vectors)
         return vectors
 
     def embed_query(self, text: str) -> list[float]:

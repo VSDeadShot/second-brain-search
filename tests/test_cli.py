@@ -1,8 +1,8 @@
 """CLI: `sbs index`, `--dry-run`, and console encoding.
 
-Every invocation injects a tmp index dir and, where embedding happens, a fake
-embedder through click's context object - no test touches the real .chroma/
-or calls the Gemini API.
+Every invocation injects a tmp index dir, a tmp embedding cache and, where
+embedding happens, a fake embedder through click's context object - no test
+touches the real .chroma/ or data/, or calls the Gemini API.
 """
 
 from __future__ import annotations
@@ -15,19 +15,44 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from second_brain.cli import cli, force_utf8_streams, format_index_report, main
-from second_brain.embedding import DEFAULT_BATCH_SIZE, GeminiEmbedder
-from second_brain.pipeline import IndexReport
+from second_brain.cli import (
+    DEFAULT_CACHE_PATH,
+    cli,
+    force_utf8_streams,
+    format_index_report,
+    main,
+)
+from second_brain.config import Config, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
+from second_brain.embedding import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_DIMENSIONS,
+    EMBEDDING_MODEL,
+    GeminiEmbedder,
+    gemini_cache_namespace,
+)
+from second_brain.embedding_cache import EmbeddingCache, cache_key
+from second_brain.pipeline import IndexReport, collect_chunks
 from second_brain.store import ChunkStore
 
 from conftest import make_file
-from fakes import FailingEmbedder, FakeClock, FakeEmbedder, StubClient, StubModels
+from fakes import (
+    FailingEmbedder,
+    FakeClock,
+    FakeEmbedder,
+    StubClient,
+    StubModels,
+    daily_quota_error,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def cache_path_for(index_dir: Path) -> Path:
+    return index_dir.parent / "embedding_cache.sqlite"
+
+
 def run(args: list[str], *, scan_root: Path, index_dir: Path, factory=None, api_key="fake-key"):
-    obj: dict = {"index_dir": index_dir}
+    obj: dict = {"index_dir": index_dir, "cache_path": cache_path_for(index_dir)}
     if factory is not None:
         obj["embedder_factory"] = factory
     return CliRunner().invoke(
@@ -196,12 +221,12 @@ def test_dry_run_single_batch_needs_under_a_minute(tmp_path: Path, corpus: Path)
 # --- progress and pacing through the CLI ---------------------------------------
 
 
-def test_index_shows_progress_for_each_batch(tmp_path: Path, corpus: Path) -> None:
-    """Real GeminiEmbedder, stubbed client, fake clock: 4 chunks at 2 per minute."""
+def stub_gemini_factory(models: StubModels):
+    """Real GeminiEmbedder over a stubbed client: 2 texts per batch, instant fake clock."""
     clock = FakeClock()
-    models = StubModels(clock=clock)
+    models.clock = clock
 
-    def paced_factory(config):
+    def factory(config):
         return GeminiEmbedder(
             client=StubClient(models=models),
             dimensions=models.dimensions,
@@ -211,12 +236,124 @@ def test_index_shows_progress_for_each_batch(tmp_path: Path, corpus: Path) -> No
             clock=clock.monotonic,
         )
 
-    result = run(["index"], scan_root=corpus, index_dir=tmp_path / "chroma", factory=paced_factory)
+    return factory
+
+
+def test_index_shows_progress_for_each_batch(tmp_path: Path, corpus: Path) -> None:
+    """4 chunks at 2 per minute."""
+    models = StubModels()
+
+    result = run(
+        ["index"], scan_root=corpus, index_dir=tmp_path / "chroma", factory=stub_gemini_factory(models)
+    )
 
     assert result.exit_code == 0, result.output
     assert "Embedding batch 1/2..." in result.output
     assert "Embedding batch 2/2..." in result.output
     assert models.call_times == [0.0, 60.0]
+
+
+# --- daily quota and resuming ---------------------------------------------------
+
+
+def test_default_cache_lives_in_the_gitignored_data_directory() -> None:
+    assert DEFAULT_CACHE_PATH.parent == REPO_ROOT / "data"
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "data/" in ignored
+
+
+def test_daily_quota_is_reported_clearly_without_retrying(tmp_path: Path, corpus: Path) -> None:
+    models = StubModels(raise_queue=[daily_quota_error()])
+
+    result = run(
+        ["index"], scan_root=corpus, index_dir=tmp_path / "chroma", factory=stub_gemini_factory(models)
+    )
+
+    assert result.exit_code != 0
+    assert "daily limit of 1000 embedded texts" in result.output
+    assert "midnight Pacific" in result.output
+    assert "Traceback" not in result.output
+    assert len(models.calls) == 1
+
+
+def test_failed_run_reports_the_progress_it_saved(tmp_path: Path, corpus: Path) -> None:
+    models = StubModels(raise_on_calls={2: daily_quota_error()})
+
+    result = run(
+        ["index"], scan_root=corpus, index_dir=tmp_path / "chroma", factory=stub_gemini_factory(models)
+    )
+
+    assert result.exit_code != 0
+    assert "2 of 4 chunks are embedded and saved" in result.output
+    assert "the next run embeds only the remaining 2 texts" in result.output
+    assert "no index has been built yet" in result.output
+
+
+def test_resumed_index_embeds_only_what_is_missing(tmp_path: Path, corpus: Path) -> None:
+    index_dir = tmp_path / "chroma"
+    run(
+        ["index"],
+        scan_root=corpus,
+        index_dir=index_dir,
+        factory=stub_gemini_factory(StubModels(raise_on_calls={2: daily_quota_error()})),
+    )
+
+    resumed = StubModels()
+    result = run(["index"], scan_root=corpus, index_dir=index_dir, factory=stub_gemini_factory(resumed))
+
+    assert result.exit_code == 0, result.output
+    assert "Embedding 2 texts - 2 of 4 chunks reuse saved embeddings" in result.output
+    assert "Embedded 2 new texts, reused 2 saved." in result.output
+    assert sum(len(call["contents"]) for call in resumed.calls) == 2
+    assert ChunkStore(index_dir).count() == 4
+
+
+def test_fully_saved_run_calls_the_api_not_at_all(tmp_path: Path, corpus: Path) -> None:
+    index_dir = tmp_path / "chroma"
+    run(["index"], scan_root=corpus, index_dir=index_dir, factory=stub_gemini_factory(StubModels()))
+
+    again = StubModels()
+    result = run(["index"], scan_root=corpus, index_dir=index_dir, factory=stub_gemini_factory(again))
+
+    assert result.exit_code == 0, result.output
+    assert "All 4 chunks already embedded" in result.output
+    assert again.calls == []
+    assert ChunkStore(index_dir).count() == 4
+
+
+def test_dry_run_counts_saved_embeddings(tmp_path: Path, corpus: Path) -> None:
+    """Tomorrow's dry run should say how much is left, not the full 812 again."""
+    index_dir = tmp_path / "chroma"
+    chunks = collect_chunks(
+        Config(
+            scan_root=corpus,
+            gemini_api_key=None,
+            include_patterns=DEFAULT_INCLUDE_PATTERNS,
+            include_dirs=("docs",),
+            exclude_dirs=DEFAULT_EXCLUDE_DIRS,
+            exclude_paths=(),
+        )
+    ).chunks
+    namespace = gemini_cache_namespace(EMBEDDING_MODEL, DEFAULT_DIMENSIONS)
+    EmbeddingCache(cache_path_for(index_dir)).put_many(
+        (cache_key(namespace, c.content_hash), [1.0]) for c in chunks[:2]
+    )
+
+    result = run(
+        ["index", "--dry-run"], scan_root=corpus, index_dir=index_dir, factory=must_not_embed
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Saved embeddings: 2 of 4 chunks already embedded" in result.output
+    assert "Estimated embedding requests: 1 (2 texts, batch size 100)" in result.output
+
+
+def test_dry_run_never_creates_the_cache(tmp_path: Path, corpus: Path) -> None:
+    index_dir = tmp_path / "chroma"
+
+    run(["index", "--dry-run"], scan_root=corpus, index_dir=index_dir, factory=must_not_embed)
+
+    assert not cache_path_for(index_dir).exists()
 
 
 # --- failure wording ------------------------------------------------------------

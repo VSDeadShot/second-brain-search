@@ -8,12 +8,26 @@ import pytest
 
 from second_brain.config import Config, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
 from second_brain.discovery import discover_documents
-from second_brain.embedding import EmbeddingError
-from second_brain.pipeline import collect_chunks, index_documents, store_chunks
+from second_brain.embedding import DailyQuotaExceeded, EmbeddingError, GeminiEmbedder
+from second_brain.embedding_cache import EmbeddingCache
+from second_brain.pipeline import (
+    EmbeddingPlan,
+    collect_chunks,
+    embedding_plan,
+    index_documents,
+    store_chunks,
+)
 from second_brain.store import ChunkStore
 
 from conftest import make_file, make_git_dir
-from fakes import FailingEmbedder, FakeEmbedder
+from fakes import (
+    FailingEmbedder,
+    FakeClock,
+    FakeEmbedder,
+    StubClient,
+    StubModels,
+    daily_quota_error,
+)
 
 
 def config_for(root: Path) -> Config:
@@ -192,6 +206,172 @@ def test_store_chunks_forwards_batch_progress(tmp_path: Path, corpus: Path) -> N
     )
 
     assert seen == [(1, 1)]
+
+
+# --- saved embeddings -----------------------------------------------------------
+
+
+def paced_gemini(models: StubModels) -> GeminiEmbedder:
+    """Real GeminiEmbedder over a stub client: 2 texts per batch, instant fake clock."""
+    clock = FakeClock()
+    models.clock = clock
+    return GeminiEmbedder(
+        client=StubClient(models=models),
+        dimensions=models.dimensions,
+        batch_size=2,
+        items_per_minute=2,
+        sleep=clock.sleep,
+        clock=clock.monotonic,
+    )
+
+
+def embedded_text_count(models: StubModels) -> int:
+    return sum(len(call["contents"]) for call in models.calls)
+
+
+def test_embeddings_are_saved_as_they_are_produced(tmp_path: Path, corpus: Path) -> None:
+    collected = collect_chunks(config_for(corpus))
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+
+    store_chunks(collected, FakeEmbedder(), ChunkStore(tmp_path / "chroma"), cache=cache)
+
+    assert cache.count() == len({c.content_hash for c in collected.chunks})
+
+
+def test_second_run_reuses_every_saved_embedding(tmp_path: Path, corpus: Path) -> None:
+    collected = collect_chunks(config_for(corpus))
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collected, FakeEmbedder(), store, cache=cache, rebuild=True)
+
+    second_embedder = FakeEmbedder()
+    report = store_chunks(collected, second_embedder, store, cache=cache, rebuild=True)
+
+    assert second_embedder.embed_calls == []
+    assert (report.embedded, report.reused) == (0, len(collected.chunks))
+    assert store.count() == len(collected.chunks)
+
+
+def test_resumed_run_embeds_only_what_the_failed_run_missed(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """The live failure, in miniature: the daily cap hits on batch 2 of 2."""
+    collected = collect_chunks(config_for(corpus))
+    total = len(collected.chunks)
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+    store = ChunkStore(tmp_path / "chroma")
+
+    failing = StubModels(raise_on_calls={2: daily_quota_error()})
+    with pytest.raises(DailyQuotaExceeded):
+        store_chunks(collected, paced_gemini(failing), store, cache=cache, rebuild=True)
+    assert cache.count() == 2  # batch 1 survived the failure
+    assert store.count() == 0  # the index itself is still all-or-nothing
+
+    resumed = StubModels()
+    report = store_chunks(collected, paced_gemini(resumed), store, cache=cache, rebuild=True)
+
+    assert embedded_text_count(resumed) == total - 2
+    assert (report.embedded, report.reused) == (total - 2, 2)
+    assert store.count() == total
+
+
+def test_failed_run_with_saved_embeddings_still_keeps_the_previous_index(
+    tmp_path: Path, corpus: Path
+) -> None:
+    collected = collect_chunks(config_for(corpus))
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collected, FakeEmbedder(), store, rebuild=True)
+    before = store.count()
+
+    failing = StubModels(raise_on_calls={2: daily_quota_error()})
+    with pytest.raises(DailyQuotaExceeded):
+        store_chunks(
+            collected,
+            paced_gemini(failing),
+            store,
+            cache=EmbeddingCache(tmp_path / "cache.sqlite"),
+            rebuild=True,
+        )
+
+    assert store.count() == before
+
+
+def test_changed_text_is_embedded_again(tmp_path: Path, corpus: Path) -> None:
+    config = config_for(corpus)
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collect_chunks(config), FakeEmbedder(), store, cache=cache, rebuild=True)
+
+    make_file(
+        corpus / "Beta" / "README.md",
+        "# Beta\n\nBeta has changed completely, and now says something else entirely.",
+    )
+    report = store_chunks(collect_chunks(config), FakeEmbedder(), store, cache=cache, rebuild=True)
+
+    assert (report.embedded, report.reused) == (1, 3)
+
+
+def test_identical_texts_are_embedded_once(tmp_path: Path) -> None:
+    """Every embedded text spends daily quota - two copies of a README should cost one."""
+    root = tmp_path / "root"
+    same = "# Shared\n\nThe same README text, copied verbatim into two projects."
+    make_file(make_git_dir(root / "One") / "README.md", same)
+    make_file(make_git_dir(root / "Two") / "README.md", same)
+    collected = collect_chunks(config_for(root))
+    embedder = FakeEmbedder()
+    store = ChunkStore(tmp_path / "chroma")
+
+    report = store_chunks(
+        collected, embedder, store, cache=EmbeddingCache(tmp_path / "cache.sqlite")
+    )
+
+    assert embedder.embed_calls == [[same]]
+    assert report.embedded == 1
+    assert store.count() == 2
+
+
+def test_saved_vectors_are_not_reused_across_vector_spaces(tmp_path: Path, corpus: Path) -> None:
+    collected = collect_chunks(config_for(corpus))
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+    store_chunks(collected, FakeEmbedder(dimensions=8), ChunkStore(tmp_path / "a"), cache=cache)
+
+    report = store_chunks(
+        collected, FakeEmbedder(dimensions=4), ChunkStore(tmp_path / "b"), cache=cache
+    )
+
+    assert report.reused == 0
+
+
+def test_embedding_plan_counts_saved_and_pending(tmp_path: Path, corpus: Path) -> None:
+    collected = collect_chunks(config_for(corpus))
+    cache = EmbeddingCache(tmp_path / "cache.sqlite")
+    embedder = FakeEmbedder()
+    namespace = embedder.cache_namespace
+    total = len(collected.chunks)
+
+    assert embedding_plan(collected.chunks, namespace, cache) == EmbeddingPlan(reused=0, to_embed=total)
+
+    store_chunks(collected, embedder, ChunkStore(tmp_path / "chroma"), cache=cache)
+
+    assert embedding_plan(collected.chunks, namespace, cache) == EmbeddingPlan(reused=total, to_embed=0)
+
+
+def test_embedding_plan_without_a_cache_counts_unique_texts(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    same = "# Shared\n\nThe same README text, copied verbatim into two projects."
+    make_file(make_git_dir(root / "One") / "README.md", same)
+    make_file(make_git_dir(root / "Two") / "README.md", same)
+    collected = collect_chunks(config_for(root))
+
+    assert embedding_plan(collected.chunks, "any", None) == EmbeddingPlan(reused=0, to_embed=1)
+
+
+def test_without_a_cache_every_chunk_counts_as_embedded(tmp_path: Path, corpus: Path) -> None:
+    collected = collect_chunks(config_for(corpus))
+
+    report = store_chunks(collected, FakeEmbedder(), ChunkStore(tmp_path / "chroma"))
+
+    assert (report.embedded, report.reused) == (len(collected.chunks), 0)
 
 
 def test_collect_chunks_matches_what_indexing_stores(tmp_path: Path, corpus: Path) -> None:

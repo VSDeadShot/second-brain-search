@@ -23,16 +23,22 @@ from .config import Config, ConfigError, load_config
 from .discovery import DiscoveredDoc, discover_documents
 from .embedding import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_DIMENSIONS,
+    EMBEDDING_MODEL,
     Embedder,
     EmbeddingError,
     GeminiEmbedder,
     estimate_embedding_seconds,
+    gemini_cache_namespace,
 )
-from .pipeline import IndexReport, collect_chunks, store_chunks
+from .embedding_cache import EmbeddingCache
+from .pipeline import EmbeddingPlan, IndexReport, collect_chunks, embedding_plan, store_chunks
 from .store import ChunkStore
 
-# src/second_brain/cli.py -> repo root. Gitignored.
-DEFAULT_INDEX_DIR = Path(__file__).resolve().parents[2] / ".chroma"
+# src/second_brain/cli.py -> repo root. Both gitignored.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_INDEX_DIR = _REPO_ROOT / ".chroma"
+DEFAULT_CACHE_PATH = _REPO_ROOT / "data" / "embedding_cache.sqlite"
 
 EmbedderFactory = Callable[[Config], Embedder]
 
@@ -95,6 +101,7 @@ def format_index_report(report: IndexReport, *, elapsed: float, index_dir: Path)
     lines = [
         f"Indexed {report.documents} documents across {report.projects} projects "
         f"-> {report.chunks} chunks ({elapsed:.1f}s)",
+        f"Embedded {report.embedded} new texts, reused {report.reused} saved.",
         "",
         *_project_lines(report),
         "",
@@ -122,9 +129,25 @@ def _index_unchanged_note(existing_chunks: int) -> str:
     return "Nothing was written - no index has been built yet."
 
 
-def _format_dry_run(report: IndexReport) -> str:
-    requests = math.ceil(report.chunks / DEFAULT_BATCH_SIZE)
-    seconds = estimate_embedding_seconds(report.chunks)
+def _embedding_header(plan: EmbeddingPlan, total: int) -> str:
+    if plan.to_embed == 0:
+        return f"All {total} chunks already embedded - reusing saved embeddings, no API calls."
+    if plan.reused:
+        return (
+            f"Embedding {plan.to_embed} texts - {plan.reused} of {total} chunks "
+            "reuse saved embeddings."
+        )
+    return f"Embedding {plan.to_embed} texts from {total} chunks..."
+
+
+def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
+    requests = math.ceil(plan.to_embed / DEFAULT_BATCH_SIZE)
+    seconds = estimate_embedding_seconds(plan.to_embed)
+    saved = (
+        [f"Saved embeddings: {plan.reused} of {report.chunks} chunks already embedded."]
+        if plan.reused
+        else []
+    )
     lines = [
         "Dry run - nothing embedded, nothing written.",
         "",
@@ -134,7 +157,9 @@ def _format_dry_run(report: IndexReport) -> str:
         *_project_lines(report),
         "",
         *_skipped_lines(report),
-        f"Estimated embedding requests: {requests} (batch size {DEFAULT_BATCH_SIZE})",
+        *saved,
+        f"Estimated embedding requests: {requests} "
+        f"({plan.to_embed} texts, batch size {DEFAULT_BATCH_SIZE})",
         f"Estimated time: {_format_duration(seconds)} (free tier: one batch per minute)",
     ]
     return "\n".join(lines)
@@ -145,7 +170,8 @@ def _format_dry_run(report: IndexReport) -> str:
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """Semantic search over your own project documentation."""
-    # Tests inject `index_dir` and `embedder_factory` here; production leaves it empty.
+    # Tests inject `index_dir`, `cache_path` and `embedder_factory` here;
+    # production leaves it empty.
     ctx.ensure_object(dict)
 
 
@@ -196,9 +222,11 @@ def index(ctx: click.Context, dry_run: bool) -> None:
     started = time.perf_counter()
     config = _load_config_or_fail()
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
+    cache_path = Path(ctx.obj.get("cache_path", DEFAULT_CACHE_PATH))
 
     click.echo(f"Scanning {config.scan_root}")
     collected = collect_chunks(config)
+    total = len(collected.chunks)
 
     if dry_run:
         if not collected.chunks:
@@ -206,7 +234,14 @@ def index(ctx: click.Context, dry_run: bool) -> None:
                 f"Nothing to index under {config.scan_root} - no chunks were produced. "
                 "Check SBS_SCAN_ROOT and config.toml."
             )
-        click.echo(_format_dry_run(collected.report))
+        # Read-only: a dry run must not create the cache. It builds no embedder
+        # (no key needed), so it assumes the production Gemini vector space.
+        plan = embedding_plan(
+            collected.chunks,
+            gemini_cache_namespace(EMBEDDING_MODEL, DEFAULT_DIMENSIONS),
+            EmbeddingCache.open_existing(cache_path),
+        )
+        click.echo(_format_dry_run(collected.report, plan))
         return
 
     # Counted before anything opens the store for writing, so failure messages
@@ -222,18 +257,33 @@ def index(ctx: click.Context, dry_run: bool) -> None:
         )
 
     factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    embedder: Embedder | None = None
+    cache: EmbeddingCache | None = None
     try:
         embedder = factory(config)
-        click.echo(f"Embedding {len(collected.chunks)} chunks...")
+        cache = EmbeddingCache(cache_path)
+        click.echo(
+            _embedding_header(embedding_plan(collected.chunks, embedder.cache_namespace, cache), total)
+        )
         report = store_chunks(
             collected,
             embedder,
             ChunkStore(index_dir),
             rebuild=True,
-            on_batch=lambda n, total: click.echo(f"Embedding batch {n}/{total}..."),
+            on_batch=lambda n, batches: click.echo(f"Embedding batch {n}/{batches}..."),
+            cache=cache,
         )
     except EmbeddingError as exc:
-        raise click.ClickException(f"{exc} {_index_unchanged_note(existing_chunks)}") from exc
+        notes = [str(exc)]
+        if embedder is not None and cache is not None:
+            after = embedding_plan(collected.chunks, embedder.cache_namespace, cache)
+            if after.reused:
+                notes.append(
+                    f"{after.reused} of {total} chunks are embedded and saved - "
+                    f"the next run embeds only the remaining {after.to_embed} texts."
+                )
+        notes.append(_index_unchanged_note(existing_chunks))
+        raise click.ClickException(" ".join(notes)) from exc
 
     click.echo(
         format_index_report(report, elapsed=time.perf_counter() - started, index_dir=index_dir)
