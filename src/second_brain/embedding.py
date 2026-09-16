@@ -3,13 +3,15 @@
 `Embedder` is the seam the rest of the pipeline depends on, so indexing and
 retrieval can be tested without a network call or an API key.
 
-NOTE: the live call is unverified as of slice 2 - no API key was available.
-`test_live_gemini_embedding_roundtrip` exercises it once a key is set, and
-EMBEDDING_MODEL is the single place to correct the name if it has moved on.
+Verified live (2026-09-16): gemini-embedding-001 accepts both retrieval task
+types and honours output_dimensionality. Truncated output is NOT unit length
+(measured L2 norm ~0.59 at 768 dims; only the full 3072 is normalised), so
+vectors are normalised here before they reach the store.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
@@ -25,6 +27,14 @@ TASK_QUERY = "RETRIEVAL_QUERY"
 
 class EmbeddingError(Exception):
     """The embedding backend failed, or returned something unusable."""
+
+
+def _normalise(vector: list[float]) -> list[float]:
+    """Scale to unit length. A zero vector is returned as-is rather than divided by 0."""
+    norm = math.sqrt(sum(v * v for v in vector))
+    if norm == 0.0:
+        return vector
+    return [v / norm for v in vector]
 
 
 @runtime_checkable
@@ -109,7 +119,7 @@ class GeminiEmbedder:
                 raise EmbeddingError(
                     f"Gemini returned {len(embeddings)} vectors, expected {len(texts)}."
                 )
-            return [list(e.values) for e in embeddings]
+            return [_normalise(list(e.values)) for e in embeddings]
 
         raise EmbeddingError(
             f"Embedding failed after {self._max_retries} attempts: {last_error}"
