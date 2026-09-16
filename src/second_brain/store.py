@@ -77,5 +77,8 @@ class ChunkStore:
             metadata={"hnsw:space": "cosine"},
         )
 
+    def all_ids(self) -> list[str]:
+        return list(self._collection.get(include=[])["ids"])
+
     def all_metadata(self) -> list[dict[str, Any]]:
         return list(self._collection.get(include=["metadatas"])["metadatas"])

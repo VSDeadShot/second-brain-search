@@ -71,6 +71,28 @@ def tree(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def corpus(tmp_path: Path) -> Path:
+    """Two small git projects with realistic-length docs: Alpha (2 files), Beta (1)."""
+    root = tmp_path / "root"
+    alpha = make_git_dir(root / "Alpha")
+    make_file(
+        alpha / "README.md",
+        "# Alpha\n\nAlpha does a thing worth describing at realistic length.\n\n"
+        "## Detail\n\nMore detail about how the thing actually works in practice.",
+    )
+    make_file(
+        alpha / "CLAUDE.md",
+        "# Notes\n\nSome notes about Alpha, long enough to clear the size floor.",
+    )
+    beta = make_git_dir(root / "Beta")
+    make_file(
+        beta / "README.md",
+        "# Beta\n\nBeta is different from Alpha, and says so at some length.",
+    )
+    return root
+
+
+@pytest.fixture
 def doc_factory(tmp_path: Path):
     """Build a DiscoveredDoc without needing a real discovery walk."""
     from second_brain.discovery import DiscoveredDoc

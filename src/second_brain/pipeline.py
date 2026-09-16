@@ -1,19 +1,20 @@
 """Full-rebuild indexing: discover -> read -> chunk -> embed -> store.
 
 SPEC decision 5 makes every index a full rebuild, so this deliberately has no
-incremental logic. Deterministic chunk ids make that cheap: upserts overwrite
-rather than accumulate.
+incremental logic. Chunking is split out as `collect_chunks` so a dry run can
+report exactly what indexing would embed without calling the API.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP, Chunk, chunk_document
 from .config import Config
 from .discovery import DiscoveredDoc, discover_documents
-from .embedding import Embedder
+from .embedding import BatchCallback, Embedder
 from .store import ChunkStore
 
 
@@ -23,18 +24,23 @@ class IndexReport:
     chunks: int
     projects: int
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    chunks_per_project: dict[str, int] = field(default_factory=dict)
 
 
-def index_documents(
+@dataclass(frozen=True)
+class ChunkCollection:
+    chunks: list[Chunk]
+    report: IndexReport
+
+
+def collect_chunks(
     config: Config,
-    embedder: Embedder,
-    store: ChunkStore,
     *,
     docs: Sequence[DiscoveredDoc] | None = None,
     max_chars: int = DEFAULT_MAX_CHARS,
     overlap: int = DEFAULT_OVERLAP,
-) -> IndexReport:
-    """Embed and store every discovered document.
+) -> ChunkCollection:
+    """Discover, read and chunk - everything short of embedding.
 
     `docs` can be supplied to reuse an existing discovery pass; otherwise the
     scan runs here.
@@ -59,13 +65,55 @@ def index_documents(
         projects.add(doc.project)
         chunks.extend(chunk_document(doc, text, max_chars=max_chars, overlap=overlap))
 
-    if chunks:
-        vectors = embedder.embed_documents([c.text for c in chunks])
-        store.upsert(chunks, vectors)
-
-    return IndexReport(
+    report = IndexReport(
         documents=read_count,
         chunks=len(chunks),
         projects=len(projects),
         skipped=skipped,
+        chunks_per_project=dict(Counter(c.project for c in chunks)),
     )
+    return ChunkCollection(chunks=chunks, report=report)
+
+
+def store_chunks(
+    collected: ChunkCollection,
+    embedder: Embedder,
+    store: ChunkStore,
+    *,
+    rebuild: bool = False,
+    on_batch: BatchCallback | None = None,
+) -> IndexReport:
+    """Embed an already-collected set of chunks and write them to the store.
+
+    Upsert alone never removes anything: chunk ids are deterministic, so a
+    deleted document - or the tail of a shrunk one - would stay searchable.
+    `rebuild=True` makes the store match this run exactly. Embedding happens
+    BEFORE the reset, so an API failure (network, quota, bad key) leaves the
+    previous index intact instead of empty.
+    """
+    vectors = (
+        embedder.embed_documents([c.text for c in collected.chunks], on_batch=on_batch)
+        if collected.chunks
+        else []
+    )
+
+    if rebuild:
+        store.reset()
+    store.upsert(collected.chunks, vectors)
+
+    return collected.report
+
+
+def index_documents(
+    config: Config,
+    embedder: Embedder,
+    store: ChunkStore,
+    *,
+    docs: Sequence[DiscoveredDoc] | None = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    overlap: int = DEFAULT_OVERLAP,
+    rebuild: bool = False,
+) -> IndexReport:
+    """Collect, embed and store every discovered document in one call."""
+    collected = collect_chunks(config, docs=docs, max_chars=max_chars, overlap=overlap)
+    return store_chunks(collected, embedder, store, rebuild=rebuild)

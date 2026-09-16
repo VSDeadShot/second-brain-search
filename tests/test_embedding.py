@@ -7,9 +7,24 @@ import os
 
 import pytest
 
-from second_brain.embedding import EmbeddingError, GeminiEmbedder
+from second_brain.embedding import (
+    FREE_TIER_ITEMS_PER_MINUTE,
+    PACING_WINDOW_SECONDS,
+    RATE_LIMIT_MARGIN_SECONDS,
+    EmbeddingError,
+    GeminiEmbedder,
+    estimate_embedding_seconds,
+)
 
-from fakes import FakeEmbedder, StubClient, StubEmbedding, StubModels, StubResponse
+from fakes import (
+    FakeClock,
+    FakeEmbedder,
+    StubClient,
+    StubEmbedding,
+    StubModels,
+    StubResponse,
+    rate_limit_error,
+)
 
 
 def l2_norm(vector: list[float]) -> float:
@@ -153,6 +168,177 @@ def test_fake_embedder_is_deterministic() -> None:
     fake = FakeEmbedder()
     assert fake.embed_documents(["x"])[0] == fake.embed_documents(["x"])[0]
     assert fake.embed_query("x") == fake.embed_documents(["x"])[0]
+
+
+# --- free-tier pacing -----------------------------------------------------------
+#
+# Measured against the live API (2026-09-16): the free tier allows 100 embedded
+# TEXTS per minute - each input in a batch counts - and refuses a call once the
+# count is already over the limit. Batching alone gives no quota relief.
+
+
+def paced_embedder(models: StubModels, clock: FakeClock, **kwargs) -> GeminiEmbedder:
+    models.clock = clock
+    return make_embedder(models, sleep=clock.sleep, clock=clock.monotonic, **kwargs)
+
+
+def texts(n: int) -> list[str]:
+    return [f"t{i}" for i in range(n)]
+
+
+def test_free_tier_limit_is_100_texts_per_minute() -> None:
+    assert FREE_TIER_ITEMS_PER_MINUTE == 100
+    assert PACING_WINDOW_SECONDS == 60
+
+
+def test_batches_never_exceed_the_per_minute_text_limit() -> None:
+    models, clock = StubModels(), FakeClock()
+    embedder = paced_embedder(models, clock, batch_size=250, items_per_minute=100)
+
+    embedder.embed_documents(texts(250))
+
+    assert [len(c["contents"]) for c in models.calls] == [100, 100, 50]
+
+
+def test_each_batch_waits_for_the_rest_of_the_minute() -> None:
+    models, clock = StubModels(), FakeClock()
+    embedder = paced_embedder(models, clock, items_per_minute=100)
+
+    embedder.embed_documents(texts(250))
+
+    assert models.call_times == [0.0, 60.0, 120.0]
+
+
+def test_request_time_counts_toward_the_minute() -> None:
+    """A batch that takes 5s to return leaves 55s to wait, not 60."""
+    models, clock = StubModels(latency=5.0), FakeClock()
+    embedder = paced_embedder(models, clock, items_per_minute=100)
+
+    embedder.embed_documents(texts(200))
+
+    assert models.call_times == [0.0, 60.0]
+    assert clock.sleeps == [55.0]
+
+
+def test_a_single_batch_never_waits() -> None:
+    models, clock = StubModels(), FakeClock()
+    embedder = paced_embedder(models, clock, items_per_minute=100)
+
+    embedder.embed_documents(texts(100))
+
+    assert clock.sleeps == []
+
+
+def test_pacing_can_be_disabled_for_paid_tiers() -> None:
+    models, clock = StubModels(), FakeClock()
+    embedder = paced_embedder(models, clock, batch_size=100, items_per_minute=None)
+
+    embedder.embed_documents(texts(250))
+
+    assert [len(c["contents"]) for c in models.calls] == [100, 100, 50]
+    assert clock.sleeps == []
+
+
+# --- 429 handling ---------------------------------------------------------------
+
+
+def test_rate_limit_waits_the_servers_retry_delay() -> None:
+    models, clock = StubModels(raise_queue=[rate_limit_error("45s")]), FakeClock()
+    embedder = paced_embedder(models, clock)
+
+    vectors = embedder.embed_documents(texts(1))
+
+    assert len(vectors) == 1
+    assert clock.sleeps == [45.0 + RATE_LIMIT_MARGIN_SECONDS]
+
+
+def test_rate_limit_delay_may_be_fractional() -> None:
+    """The live 429 said 'retryDelay': '45s' but its message said 45.676528856s."""
+    models, clock = StubModels(raise_queue=[rate_limit_error("45.676528856s")]), FakeClock()
+
+    paced_embedder(models, clock).embed_documents(texts(1))
+
+    assert clock.sleeps == [pytest.approx(45.676528856 + RATE_LIMIT_MARGIN_SECONDS)]
+
+
+def test_rate_limit_without_retry_info_waits_a_full_window() -> None:
+    models, clock = StubModels(raise_queue=[rate_limit_error(retry_delay=None)]), FakeClock()
+
+    paced_embedder(models, clock).embed_documents(texts(1))
+
+    assert clock.sleeps == [PACING_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
+
+
+def test_other_errors_keep_exponential_backoff() -> None:
+    models, clock = StubModels(failures_before_success=2), FakeClock()
+
+    paced_embedder(models, clock, max_retries=3).embed_documents(texts(1))
+
+    assert clock.sleeps == [1, 2]
+
+
+def test_a_retried_batch_restarts_the_pacing_window() -> None:
+    """After a 46s rate-limit wait, the next batch counts its minute from the retry."""
+    models, clock = StubModels(raise_queue=[rate_limit_error("45s")]), FakeClock()
+    embedder = paced_embedder(models, clock, items_per_minute=100)
+
+    embedder.embed_documents(texts(200))
+
+    retry_at = 45.0 + RATE_LIMIT_MARGIN_SECONDS
+    assert models.call_times == [0.0, retry_at, retry_at + 60.0]
+
+
+def test_persistent_rate_limiting_gives_up_with_the_quota_message() -> None:
+    models = StubModels(raise_queue=[rate_limit_error() for _ in range(3)])
+    embedder = paced_embedder(models, FakeClock(), max_retries=3)
+
+    with pytest.raises(EmbeddingError, match="429"):
+        embedder.embed_documents(texts(1))
+
+
+# --- progress -------------------------------------------------------------------
+
+
+def test_progress_is_reported_before_each_batch() -> None:
+    models, clock = StubModels(), FakeClock()
+    seen: list[tuple[int, int]] = []
+
+    paced_embedder(models, clock, items_per_minute=100).embed_documents(
+        texts(250), on_batch=lambda n, total: seen.append((n, total))
+    )
+
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_no_progress_for_empty_input() -> None:
+    seen: list[tuple[int, int]] = []
+
+    make_embedder(StubModels()).embed_documents([], on_batch=lambda n, t: seen.append((n, t)))
+
+    assert seen == []
+
+
+# --- time estimate --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("chunks", "expected_seconds"),
+    [
+        (0, 0),
+        (1, 0),
+        (100, 0),  # one batch, no wait
+        (101, 60),  # two batches, one wait
+        (812, 480),  # the real corpus: 9 batches, 8 waits
+    ],
+)
+def test_estimate_counts_one_minute_per_wait_between_batches(
+    chunks: int, expected_seconds: int
+) -> None:
+    assert estimate_embedding_seconds(chunks) == expected_seconds
+
+
+def test_estimate_is_zero_when_pacing_is_disabled() -> None:
+    assert estimate_embedding_seconds(812, items_per_minute=None) == 0
 
 
 @pytest.mark.skipif(

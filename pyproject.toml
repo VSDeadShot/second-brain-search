@@ -18,7 +18,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-sbs = "second_brain.cli:cli"
+sbs = "second_brain.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
