@@ -3,6 +3,14 @@
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
+
+# The project's documented config source is .env, so opt-in tests gated on
+# GEMINI_API_KEY must see a key set there - not only a shell export. Runs at
+# import time, before any skipif in a test module is evaluated. override=False
+# keeps a real environment variable authoritative. Safe for hermeticity: every
+# load_config() call in the suite passes an explicit env mapping.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 def make_file(path: Path, content: str = "x") -> Path:
