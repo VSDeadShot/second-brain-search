@@ -8,11 +8,18 @@ types and honours output_dimensionality. Truncated output is NOT unit length
 (measured L2 norm ~0.59 at 768 dims; only the full 3072 is normalised), so
 vectors are normalised here before they reach the store.
 
-Free-tier quota, measured by probe the same day: 100 embedded TEXTS per minute
-per project - every input in a batch counts, so batching gives no relief - and
-a call is refused once the count is already over the limit. A full rebuild is
-therefore paced at one 100-text batch per minute, and a 429 waits out the
-server's own retryDelay rather than a fixed backoff.
+Free-tier limits for gemini-embedding-001 ("Gemini Embedding 1"), read from
+AI Studio's rate-limit page for this project on 2026-09-18:
+- RPM 100 - embedded TEXTS, not HTTP calls: every input in a batch counts, and
+  a call is refused once the count is already over. (Probed 2026-09-16.)
+- RPD 1000 texts, resetting at midnight Pacific.
+- TPM 30,000 input tokens. Exceeding it returns a bare 429 - no quota named,
+  no retry delay. A lone 30.1k batch could never pass; and two consecutive
+  ~20k batches a minute apart were refused, so neighbouring batches count
+  against the same window.
+So a batch closes at 100 texts or 12k estimated tokens, one batch per minute:
+two back-to-back batches stay at most 24k, 20% under the 30k limit. The
+chars / 4 estimate was checked against count_tokens: within 5%.
 """
 
 from __future__ import annotations
@@ -31,6 +38,11 @@ TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
 TASK_QUERY = "RETRIEVAL_QUERY"
 
 FREE_TIER_ITEMS_PER_MINUTE = 100
+FREE_TIER_TOKENS_PER_MINUTE = 30_000
+# Two consecutive batches can land in one rate window, so each batch gets at
+# most 40% of the limit: back-to-back batches then total <= 80%.
+TOKEN_BUDGET_PER_MINUTE = FREE_TIER_TOKENS_PER_MINUTE * 2 // 5  # 12,000
+CHARS_PER_TOKEN_ESTIMATE = 4
 PACING_WINDOW_SECONDS = 60
 # Added to the server's retryDelay so the retry lands just after the window
 # clears rather than racing its boundary.
@@ -49,9 +61,86 @@ class DailyQuotaExceeded(EmbeddingError):
     """The per-day quota is used up. Retrying within the day cannot succeed."""
 
 
+class UnexplainedRateLimit(EmbeddingError):
+    """A 429 naming no quota and giving no retry delay. Waiting didn't help live,
+    so it fails at once instead of burning minutes on doomed retries."""
+
+
 def gemini_cache_namespace(model: str, dimensions: int) -> str:
     """Identifies a vector space: saved vectors are only reusable within one."""
     return f"{model}|{dimensions}|{TASK_DOCUMENT}"
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count for batch sizing - chars / 4, rounded up. No API call."""
+    return math.ceil(len(text) / CHARS_PER_TOKEN_ESTIMATE)
+
+
+def plan_batches(
+    texts: Sequence[str],
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    items_per_minute: int | None = FREE_TIER_ITEMS_PER_MINUTE,
+    tokens_per_minute: int | None = TOKEN_BUDGET_PER_MINUTE,
+) -> list[list[str]]:
+    """Split texts, in order, into batches that respect both the count cap and the
+    token budget. A single text over the budget still goes, alone - never dropped."""
+    max_count = batch_size if items_per_minute is None else min(batch_size, items_per_minute)
+
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        tokens = estimate_tokens(text)
+        too_many = len(current) >= max_count
+        too_big = (
+            tokens_per_minute is not None
+            and current
+            and current_tokens + tokens > tokens_per_minute
+        )
+        if too_many or too_big:
+            batches.append(current)
+            current, current_tokens = [], 0
+        current.append(text)
+        current_tokens += tokens
+    if current:
+        batches.append(current)
+    return batches
+
+
+def estimate_embedding_seconds(
+    texts: Sequence[str],
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    items_per_minute: int | None = FREE_TIER_ITEMS_PER_MINUTE,
+    tokens_per_minute: int | None = TOKEN_BUDGET_PER_MINUTE,
+) -> int:
+    """Pacing time for a run: one full window between consecutive batches.
+
+    Request latency is ignored - it is small, and it counts toward each window
+    anyway, so the estimate is an upper bound on the waiting, not on the whole run.
+    """
+    if items_per_minute is None:
+        return 0
+    batches = plan_batches(
+        texts,
+        batch_size=batch_size,
+        items_per_minute=items_per_minute,
+        tokens_per_minute=tokens_per_minute,
+    )
+    return max(len(batches) - 1, 0) * PACING_WINDOW_SECONDS
+
+
+def _error_details(exc: Exception) -> list[dict]:
+    """The google.rpc detail entries of a google-genai ClientError, if any."""
+    body = getattr(exc, "details", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    details = error.get("details", []) if isinstance(error, dict) else []
+    return [d for d in details if isinstance(d, dict)]
+
+
+def _has_detail(exc: Exception, type_suffix: str) -> bool:
+    return any(str(d.get("@type", "")).endswith(type_suffix) for d in _error_details(exc))
 
 
 def _daily_quota_limit(exc: Exception) -> str | None:
@@ -63,11 +152,8 @@ def _daily_quota_limit(exc: Exception) -> str | None:
     """
     if getattr(exc, "code", None) != 429:
         return None
-
-    body = getattr(exc, "details", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    for detail in error.get("details", []) if isinstance(error, dict) else []:
-        if not isinstance(detail, dict) or not str(detail.get("@type", "")).endswith("QuotaFailure"):
+    for detail in _error_details(exc):
+        if not str(detail.get("@type", "")).endswith("QuotaFailure"):
             continue
         for violation in detail.get("violations", []):
             if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
@@ -75,33 +161,13 @@ def _daily_quota_limit(exc: Exception) -> str | None:
     return None
 
 
-def _normalise(vector: list[float]) -> list[float]:
-    """Scale to unit length. A zero vector is returned as-is rather than divided by 0."""
-    norm = math.sqrt(sum(v * v for v in vector))
-    if norm == 0.0:
-        return vector
-    return [v / norm for v in vector]
-
-
-def _effective_batch_size(batch_size: int, items_per_minute: int | None) -> int:
-    return batch_size if items_per_minute is None else min(batch_size, items_per_minute)
-
-
-def estimate_embedding_seconds(
-    chunks: int,
-    *,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    items_per_minute: int | None = FREE_TIER_ITEMS_PER_MINUTE,
-) -> int:
-    """Pacing time for a run: one full window between consecutive batches.
-
-    Request latency is ignored - it is small, and it counts toward each window
-    anyway, so the estimate is an upper bound on the waiting, not on the whole run.
-    """
-    if chunks <= 0 or items_per_minute is None:
-        return 0
-    batches = math.ceil(chunks / _effective_batch_size(batch_size, items_per_minute))
-    return (batches - 1) * PACING_WINDOW_SECONDS
+def _is_unexplained_rate_limit(exc: Exception) -> bool:
+    """A 429 with neither a QuotaFailure nor a RetryInfo - the bare 429 seen live."""
+    return (
+        getattr(exc, "code", None) == 429
+        and not _has_detail(exc, "QuotaFailure")
+        and not _has_detail(exc, "RetryInfo")
+    )
 
 
 def _rate_limit_delay(exc: Exception) -> float | None:
@@ -113,17 +179,22 @@ def _rate_limit_delay(exc: Exception) -> float | None:
     """
     if getattr(exc, "code", None) != 429:
         return None
-
-    body = getattr(exc, "details", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    for detail in error.get("details", []) if isinstance(error, dict) else []:
-        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("RetryInfo"):
+    for detail in _error_details(exc):
+        if str(detail.get("@type", "")).endswith("RetryInfo"):
             raw = str(detail.get("retryDelay", "")).strip().removesuffix("s")
             try:
                 return float(raw)
             except ValueError:
                 break
     return float(PACING_WINDOW_SECONDS)
+
+
+def _normalise(vector: list[float]) -> list[float]:
+    """Scale to unit length. A zero vector is returned as-is rather than divided by 0."""
+    norm = math.sqrt(sum(v * v for v in vector))
+    if norm == 0.0:
+        return vector
+    return [v / norm for v in vector]
 
 
 @runtime_checkable
@@ -157,6 +228,7 @@ class GeminiEmbedder:
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_retries: int = DEFAULT_MAX_RETRIES,
         items_per_minute: int | None = FREE_TIER_ITEMS_PER_MINUTE,
+        tokens_per_minute: int | None = TOKEN_BUDGET_PER_MINUTE,
         client: Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -167,12 +239,15 @@ class GeminiEmbedder:
             raise ValueError("max_retries must be at least 1")
         if items_per_minute is not None and items_per_minute < 1:
             raise ValueError("items_per_minute must be at least 1, or None to disable pacing")
+        if tokens_per_minute is not None and tokens_per_minute < 1:
+            raise ValueError("tokens_per_minute must be at least 1, or None to disable")
 
         self._model = model
         self._dimensions = dimensions
         self._batch_size = batch_size
         self._max_retries = max_retries
         self._items_per_minute = items_per_minute
+        self._tokens_per_minute = tokens_per_minute
         self._sleep = sleep
         self._clock = clock
         # When the most recent request attempt was sent - the start of the quota
@@ -235,6 +310,13 @@ class GeminiEmbedder:
                         "used up. It resets at midnight Pacific time - run `sbs index` again "
                         "after that."
                     ) from exc
+                if _is_unexplained_rate_limit(exc):
+                    tokens = sum(estimate_tokens(t) for t in texts)
+                    raise UnexplainedRateLimit(
+                        f"Gemini refused a batch of {len(texts)} texts (~{tokens} estimated "
+                        "tokens) with a 429 that names no quota and gives no retry delay. "
+                        "Waiting didn't clear this before, so the run stops here."
+                    ) from exc
                 last_error = exc
                 if attempt < self._max_retries:
                     server_delay = _rate_limit_delay(exc)
@@ -268,8 +350,12 @@ class GeminiEmbedder:
         if not items:
             return []
 
-        size = _effective_batch_size(self._batch_size, self._items_per_minute)
-        batches = [items[start : start + size] for start in range(0, len(items), size)]
+        batches = plan_batches(
+            items,
+            batch_size=self._batch_size,
+            items_per_minute=self._items_per_minute,
+            tokens_per_minute=self._tokens_per_minute,
+        )
 
         vectors: list[list[float]] = []
         for number, batch in enumerate(batches, start=1):

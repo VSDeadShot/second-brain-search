@@ -12,11 +12,16 @@ from second_brain.embedding import (
     FREE_TIER_ITEMS_PER_MINUTE,
     PACING_WINDOW_SECONDS,
     RATE_LIMIT_MARGIN_SECONDS,
+    FREE_TIER_TOKENS_PER_MINUTE,
+    TOKEN_BUDGET_PER_MINUTE,
     DailyQuotaExceeded,
     EmbeddingError,
     GeminiEmbedder,
+    UnexplainedRateLimit,
     estimate_embedding_seconds,
+    estimate_tokens,
     gemini_cache_namespace,
+    plan_batches,
 )
 
 from fakes import (
@@ -26,6 +31,7 @@ from fakes import (
     StubEmbedding,
     StubModels,
     StubResponse,
+    bare_rate_limit_error,
     daily_quota_error,
     rate_limit_error,
 )
@@ -424,23 +430,157 @@ def test_no_progress_for_empty_input() -> None:
 
 
 @pytest.mark.parametrize(
-    ("chunks", "expected_seconds"),
+    ("count", "expected_seconds"),
     [
         (0, 0),
         (1, 0),
         (100, 0),  # one batch, no wait
         (101, 60),  # two batches, one wait
-        (812, 480),  # the real corpus: 9 batches, 8 waits
+        (812, 480),  # 9 batches of short texts, 8 waits
     ],
 )
 def test_estimate_counts_one_minute_per_wait_between_batches(
-    chunks: int, expected_seconds: int
+    count: int, expected_seconds: int
 ) -> None:
-    assert estimate_embedding_seconds(chunks) == expected_seconds
+    assert estimate_embedding_seconds(texts(count)) == expected_seconds
 
 
 def test_estimate_is_zero_when_pacing_is_disabled() -> None:
-    assert estimate_embedding_seconds(812, items_per_minute=None) == 0
+    assert estimate_embedding_seconds(texts(812), items_per_minute=None) == 0
+
+
+def test_estimate_counts_the_extra_batches_large_texts_need() -> None:
+    """100 texts of ~1200 chars (~300 tokens each) is one batch by count but three by
+    size at 12k tokens per batch."""
+    assert estimate_embedding_seconds(sized_texts(100, chars=1200)) == 120
+
+
+# --- batch size by estimated tokens ---------------------------------------------
+#
+# The free-tier TPM limit is 30,000 (read from AI Studio's rate-limit page,
+# 2026-09-18). Live evidence: a lone 30.1k batch was refused however long we
+# waited, and two consecutive ~20k batches a minute apart were refused too - so
+# neighbouring batches share a window. Each batch gets at most 12k (40%), so two
+# back-to-back batches stay at 24k, 20% under the limit.
+
+
+def sized_texts(n: int, *, chars: int) -> list[str]:
+    return [f"{i:04d}" + "x" * (chars - 4) for i in range(n)]
+
+
+def test_token_budget_leaves_room_for_two_batches_in_one_window() -> None:
+    assert FREE_TIER_TOKENS_PER_MINUTE == 30_000
+    assert TOKEN_BUDGET_PER_MINUTE == 12_000
+    assert 2 * TOKEN_BUDGET_PER_MINUTE <= 0.8 * FREE_TIER_TOKENS_PER_MINUTE
+
+
+def test_tokens_are_estimated_at_4_chars_each_rounded_up() -> None:
+    assert estimate_tokens("x" * 4000) == 1000
+    assert estimate_tokens("x" * 4001) == 1001
+
+
+def test_two_consecutive_batches_stay_under_the_limit() -> None:
+    """The rerun's failure: batch 1 (~19.6k) then batch 2 (~20.3k), refused together."""
+    batches = plan_batches(sized_texts(300, chars=1204))
+    tokens = [sum(estimate_tokens(t) for t in b) for b in batches]
+
+    assert all(a + b < FREE_TIER_TOKENS_PER_MINUTE for a, b in zip(tokens, tokens[1:]))
+
+
+def test_batches_close_at_the_token_budget() -> None:
+    batches = plan_batches(sized_texts(5, chars=4000), tokens_per_minute=2500)
+
+    assert [len(b) for b in batches] == [2, 2, 1]
+
+
+def test_the_count_cap_still_applies_to_small_texts() -> None:
+    assert [len(b) for b in plan_batches(texts(250))] == [100, 100, 50]
+
+
+def test_a_text_over_the_budget_on_its_own_is_sent_alone() -> None:
+    """Never an empty batch, never dropped - a lone oversized text still goes."""
+    small, huge = "small text", "x" * 20_000
+    batches = plan_batches([small, huge, small], tokens_per_minute=1000)
+
+    assert batches == [[small], [huge], [small]]
+
+
+def test_batch_3_of_the_failed_run_is_now_split() -> None:
+    """The refused batch: 100 texts, ~120k chars, ~30k estimated tokens."""
+    batches = plan_batches(sized_texts(100, chars=1204))
+
+    assert len(batches) == 3
+    assert all(sum(estimate_tokens(t) for t in b) <= TOKEN_BUDGET_PER_MINUTE for b in batches)
+
+
+def test_batches_keep_input_order() -> None:
+    items = sized_texts(7, chars=4000)
+
+    batches = plan_batches(items, tokens_per_minute=2500)
+
+    assert [t for b in batches for t in b] == items
+
+
+def test_token_budget_can_be_disabled() -> None:
+    assert [len(b) for b in plan_batches(sized_texts(100, chars=4000), tokens_per_minute=None)] == [100]
+
+
+def test_embedder_sends_token_budgeted_batches_a_minute_apart() -> None:
+    models, clock = StubModels(), FakeClock()
+    embedder = paced_embedder(models, clock, tokens_per_minute=2500)
+
+    embedder.embed_documents(sized_texts(5, chars=4000))
+
+    assert [len(c["contents"]) for c in models.calls] == [2, 2, 1]
+    assert models.call_times == [0.0, 60.0, 120.0]
+
+
+def test_progress_counts_token_budgeted_batches() -> None:
+    seen: list[tuple[int, int]] = []
+
+    paced_embedder(StubModels(), FakeClock(), tokens_per_minute=2500).embed_documents(
+        sized_texts(5, chars=4000), on_batch=lambda n, total: seen.append((n, total))
+    )
+
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+# --- 429 with no quota named and no retry delay ---------------------------------
+
+
+def test_unexplained_429_fails_immediately() -> None:
+    """Today's bare 429 was retried after two 61s waits and refused both times."""
+    models, clock = StubModels(raise_queue=[bare_rate_limit_error()]), FakeClock()
+
+    with pytest.raises(UnexplainedRateLimit):
+        paced_embedder(models, clock, max_retries=3).embed_documents(texts(1))
+
+    assert len(models.calls) == 1
+    assert clock.sleeps == []
+
+
+def test_unexplained_429_message_gives_the_batch_size() -> None:
+    models = StubModels(raise_queue=[bare_rate_limit_error()])
+
+    with pytest.raises(UnexplainedRateLimit) as exc_info:
+        paced_embedder(models, FakeClock()).embed_documents(sized_texts(3, chars=400))
+
+    message = str(exc_info.value)
+    assert "3 texts" in message
+    assert "~300 estimated tokens" in message
+
+
+def test_unexplained_429_is_an_embedding_error() -> None:
+    assert issubclass(UnexplainedRateLimit, EmbeddingError)
+
+
+def test_a_named_per_minute_quota_without_a_delay_still_waits() -> None:
+    """Only the fully bare 429 fails fast; a 429 naming its quota is still waited out."""
+    models, clock = StubModels(raise_queue=[rate_limit_error(retry_delay=None)]), FakeClock()
+
+    paced_embedder(models, clock).embed_documents(texts(1))
+
+    assert clock.sleeps == [PACING_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
 
 
 @pytest.mark.skipif(

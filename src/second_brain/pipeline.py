@@ -43,6 +43,8 @@ class EmbeddingPlan:
     """Chunks whose embedding is already saved."""
     to_embed: int
     """Unique texts that would be sent to the API - identical text is embedded once."""
+    pending: tuple[str, ...] = field(default=(), compare=False, repr=False)
+    """Those texts, in send order - batch count depends on their size, not just count."""
 
 
 @dataclass(frozen=True)
@@ -61,9 +63,14 @@ def embedding_plan(
     """How much of a run is already paid for. Read-only."""
     keys = _keys(chunks, namespace)
     saved = cache.get_many(keys) if cache is not None and keys else {}
+    pending: dict[str, str] = {}
+    for key, chunk in zip(keys, chunks):
+        if key not in saved:
+            pending.setdefault(key, chunk.embed_text)
     return EmbeddingPlan(
         reused=sum(1 for key in keys if key in saved),
-        to_embed=len({key for key in keys if key not in saved}),
+        to_embed=len(pending),
+        pending=tuple(pending.values()),
     )
 
 

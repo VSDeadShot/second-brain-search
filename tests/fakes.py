@@ -172,6 +172,29 @@ def rate_limit_error(
     )
 
 
+def bare_rate_limit_error() -> Exception:
+    """The third live run's failure (2026-09-18, batch 3 of 9): a 429 whose only
+    detail is a help link - no QuotaFailure naming the quota, no RetryInfo."""
+    from google.genai import errors
+
+    return errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "message": "You exceeded your current quota, please check your plan and billing details.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.Help",
+                        "links": [{"description": "Learn more about Gemini API quotas"}],
+                    }
+                ],
+            }
+        },
+    )
+
+
 def daily_quota_error() -> Exception:
     """The second live run's failure: the daily cap. Note the server still sent a
     58s retryDelay - waiting it out cannot help."""

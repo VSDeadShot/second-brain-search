@@ -30,6 +30,7 @@ from .embedding import (
     GeminiEmbedder,
     estimate_embedding_seconds,
     gemini_cache_namespace,
+    plan_batches,
 )
 from .embedding_cache import EmbeddingCache
 from .pipeline import EmbeddingPlan, IndexReport, collect_chunks, embedding_plan, store_chunks
@@ -144,8 +145,8 @@ def _embedding_header(plan: EmbeddingPlan, total: int) -> str:
 
 
 def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
-    requests = math.ceil(plan.to_embed / DEFAULT_BATCH_SIZE)
-    seconds = estimate_embedding_seconds(plan.to_embed)
+    requests = len(plan_batches(plan.pending))
+    seconds = estimate_embedding_seconds(plan.pending)
     saved = (
         [f"Saved embeddings: {plan.reused} of {report.chunks} chunks already embedded."]
         if plan.reused

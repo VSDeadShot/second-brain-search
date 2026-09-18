@@ -44,6 +44,7 @@ from fakes import (
     KeywordEmbedder,
     StubClient,
     StubModels,
+    bare_rate_limit_error,
     daily_quota_error,
 )
 
@@ -357,6 +358,38 @@ def test_dry_run_never_creates_the_cache(tmp_path: Path, corpus: Path) -> None:
     run(["index", "--dry-run"], scan_root=corpus, index_dir=index_dir, factory=must_not_embed)
 
     assert not cache_path_for(index_dir).exists()
+
+
+def test_dry_run_counts_batches_by_size_not_just_count(tmp_path: Path) -> None:
+    """70 texts of ~1,400 chars (~344 tokens): one request by count, three once sized."""
+    root = tmp_path / "root"
+    body = "word " * 275  # ~1,375 chars per section
+    make_file(
+        make_git_dir(root / "Solo") / "README.md",
+        "\n\n".join(f"# Part {i}\n\n{body}" for i in range(70)),
+    )
+
+    result = run(
+        ["index", "--dry-run"], scan_root=root, index_dir=tmp_path / "chroma", factory=must_not_embed
+    )
+
+    assert "Estimated embedding requests: 3 (70 texts" in result.output
+    assert "Estimated time: ~2 min" in result.output
+
+
+def test_unexplained_429_stops_cleanly_and_reports_saved_progress(
+    tmp_path: Path, corpus: Path
+) -> None:
+    models = StubModels(raise_on_calls={2: bare_rate_limit_error()})
+
+    result = run(
+        ["index"], scan_root=corpus, index_dir=tmp_path / "chroma", factory=stub_gemini_factory(models)
+    )
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "2 of 4 chunks are embedded and saved" in result.output
+    assert len(models.calls) == 2  # no retries after the bare 429
 
 
 # --- sbs search -----------------------------------------------------------------
