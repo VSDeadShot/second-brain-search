@@ -17,7 +17,7 @@ from second_brain.pipeline import (
     index_documents,
     store_chunks,
 )
-from second_brain.store import ChunkStore
+from second_brain.store import ChunkStore, VectorSpaceMismatch
 
 from conftest import make_file, make_git_dir
 from fakes import (
@@ -394,6 +394,55 @@ def test_embedder_receives_heading_prefixed_text_but_the_store_keeps_display_tex
     assert headless.embed_text in sent
     assert headless.text not in sent
     assert store.get(headless.chunk_id)["text"] == headless.text
+
+
+# --- vector space recorded in the index -----------------------------------------
+
+
+def test_rebuild_records_the_embedders_vector_space(tmp_path: Path, corpus: Path) -> None:
+    store = ChunkStore(tmp_path / "chroma")
+    embedder = FakeEmbedder()
+
+    store_chunks(collect_chunks(config_for(corpus)), embedder, store, rebuild=True)
+
+    assert ChunkStore(tmp_path / "chroma").namespace == embedder.cache_namespace
+
+
+def test_first_write_to_a_fresh_store_records_the_vector_space(
+    tmp_path: Path, corpus: Path
+) -> None:
+    store = ChunkStore(tmp_path / "chroma")
+    embedder = FakeEmbedder()
+
+    store_chunks(collect_chunks(config_for(corpus)), embedder, store)
+
+    assert store.namespace == embedder.cache_namespace
+
+
+def test_mixing_vector_spaces_in_one_index_is_refused_before_embedding(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """Same dimensions, different model: Chroma would accept the vectors silently."""
+    collected = collect_chunks(config_for(corpus))
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collected, FakeEmbedder(), store)
+    other = FailingEmbedder()  # same 8 dims, different namespace
+
+    with pytest.raises(VectorSpaceMismatch):
+        store_chunks(collected, other, store)
+
+    assert other.embed_calls == []
+
+
+def test_rebuild_may_switch_vector_space(tmp_path: Path, corpus: Path) -> None:
+    """A rebuild replaces the whole index, so changing embedders is legitimate there."""
+    collected = collect_chunks(config_for(corpus))
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collected, FakeEmbedder(dimensions=8), store, rebuild=True)
+
+    store_chunks(collected, FakeEmbedder(dimensions=4), store, rebuild=True)
+
+    assert store.namespace == FakeEmbedder(dimensions=4).cache_namespace
 
 
 def test_collect_chunks_matches_what_indexing_stores(tmp_path: Path, corpus: Path) -> None:

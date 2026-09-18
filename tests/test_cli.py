@@ -34,11 +34,14 @@ from second_brain.embedding_cache import EmbeddingCache, cache_key
 from second_brain.pipeline import IndexReport, collect_chunks
 from second_brain.store import ChunkStore
 
-from conftest import make_file
+from conftest import make_file, make_git_dir
+from second_brain.embedding import DailyQuotaExceeded
+
 from fakes import (
     FailingEmbedder,
     FakeClock,
     FakeEmbedder,
+    KeywordEmbedder,
     StubClient,
     StubModels,
     daily_quota_error,
@@ -354,6 +357,140 @@ def test_dry_run_never_creates_the_cache(tmp_path: Path, corpus: Path) -> None:
     run(["index", "--dry-run"], scan_root=corpus, index_dir=index_dir, factory=must_not_embed)
 
     assert not cache_path_for(index_dir).exists()
+
+
+# --- sbs search -----------------------------------------------------------------
+
+
+def keyword_factory(config):
+    return KeywordEmbedder()
+
+
+def indexed_knowledge(tmp_path: Path, knowledge: Path) -> Path:
+    index_dir = tmp_path / "chroma"
+    result = run(["index"], scan_root=knowledge, index_dir=index_dir, factory=keyword_factory)
+    assert result.exit_code == 0, result.output
+    return index_dir
+
+
+def search(args: list[str], *, knowledge: Path, index_dir: Path, factory=keyword_factory):
+    return run(["search", *args], scan_root=knowledge, index_dir=index_dir, factory=factory)
+
+
+def test_search_shows_ranked_results_with_citations(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["how did I handle photo compression"], knowledge=knowledge, index_dir=index_dir)
+
+    assert result.exit_code == 0, result.output
+    first = next(line for line in result.output.splitlines() if line.startswith("1."))
+    assert "Macro Tracker / CLAUDE.md > Photos" in first
+    assert "[0." in first or "[1." in first
+
+
+def test_search_respects_k(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["caching", "-k", "1"], knowledge=knowledge, index_dir=index_dir)
+
+    lines = result.output.splitlines()
+    assert any(line.startswith("1.") for line in lines)
+    assert not any(line.startswith("2.") for line in lines)
+
+
+def test_search_can_be_limited_to_a_project(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["photo compression", "--project", "rdbms"], knowledge=knowledge, index_dir=index_dir)
+
+    ranked = [line for line in result.output.splitlines() if line[:1].isdigit()]
+    assert ranked and all("RDBMS /" in line for line in ranked)
+
+
+def test_search_rejects_k_outside_1_to_50(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["caching", "-k", "0"], knowledge=knowledge, index_dir=index_dir)
+
+    assert result.exit_code == 2  # click usage error
+
+
+def test_search_snippets_are_one_line_and_truncated(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    long_body = "\n\n".join(f"caching paragraph number {i} with filler text here" for i in range(20))
+    make_file(make_git_dir(root / "Solo") / "README.md", f"# Caching\n\n{long_body}")
+    index_dir = tmp_path / "chroma"
+    run(["index"], scan_root=root, index_dir=index_dir, factory=keyword_factory)
+
+    result = search(["caching"], knowledge=root, index_dir=index_dir)
+
+    lines = result.output.splitlines()
+    snippet = lines[lines.index(next(l for l in lines if l.startswith("1."))) + 1]
+    assert snippet.startswith("   ")
+    assert snippet.rstrip().endswith("...")
+    assert len(snippet) <= 3 + 240 + 3
+
+
+def test_search_prints_emoji_from_the_corpus(tmp_path: Path) -> None:
+    """11 of the real documents contain emoji; they must reach the terminal intact."""
+    root = tmp_path / "root"
+    make_file(
+        make_git_dir(root / "Solo") / "README.md",
+        "# Launch\n\nThe launch checklist is complete \U0001f680 and every caching step passed.",
+    )
+    index_dir = tmp_path / "chroma"
+    run(["index"], scan_root=root, index_dir=index_dir, factory=keyword_factory)
+
+    result = search(["launch checklist"], knowledge=root, index_dir=index_dir)
+
+    assert "\U0001f680" in result.output
+
+
+def test_search_without_an_index_is_clean_and_creates_nothing(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = tmp_path / "chroma"
+
+    result = search(["caching"], knowledge=knowledge, index_dir=index_dir, factory=must_not_embed)
+
+    assert result.exit_code != 0
+    assert "sbs index" in result.output
+    assert "Traceback" not in result.output
+    assert not index_dir.exists()
+
+
+def test_search_against_an_index_from_another_embedder_is_clean(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["caching"], knowledge=knowledge, index_dir=index_dir, factory=fake_factory)
+
+    assert result.exit_code != 0
+    assert "keyword|256" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_search_unknown_project_is_clean(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = search(["caching", "--project", "Nope"], knowledge=knowledge, index_dir=index_dir)
+
+    assert result.exit_code != 0
+    assert "Watch Tracker" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_search_daily_quota_is_clean(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    class QuotaSpent(KeywordEmbedder):
+        def embed_query(self, text: str) -> list[float]:
+            raise DailyQuotaExceeded("Gemini's free-tier daily limit of 1000 embedded texts is used up.")
+
+    result = search(["caching"], knowledge=knowledge, index_dir=index_dir, factory=lambda c: QuotaSpent())
+
+    assert result.exit_code != 0
+    assert "daily limit" in result.output
+    assert "Traceback" not in result.output
 
 
 # --- failure wording ------------------------------------------------------------

@@ -33,7 +33,10 @@ from .embedding import (
 )
 from .embedding_cache import EmbeddingCache
 from .pipeline import EmbeddingPlan, IndexReport, collect_chunks, embedding_plan, store_chunks
+from .retrieval import DEFAULT_K, RetrievalError, RetrievedChunk, retrieve
 from .store import ChunkStore
+
+SNIPPET_CHARS = 240
 
 # src/second_brain/cli.py -> repo root. Both gitignored.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -288,6 +291,55 @@ def index(ctx: click.Context, dry_run: bool) -> None:
     click.echo(
         format_index_report(report, elapsed=time.perf_counter() - started, index_dir=index_dir)
     )
+
+
+def _snippet(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= SNIPPET_CHARS else flat[:SNIPPET_CHARS].rstrip() + "..."
+
+
+def _citation(result: RetrievedChunk) -> str:
+    location = f"{result.project} / {result.rel_path}"
+    return f"{location} > {result.heading_path}" if result.heading_path else location
+
+
+def format_search_results(query: str, results: Sequence[RetrievedChunk]) -> str:
+    lines = [f'Top {len(results)} for "{query}":', ""]
+    for rank, result in enumerate(results, start=1):
+        lines.append(f"{rank}. [{result.score:.2f}] {_citation(result)}")
+        lines.append(f"   {_snippet(result.text)}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+@cli.command()
+@click.argument("query")
+@click.option(
+    "-k",
+    "k",
+    type=click.IntRange(1, 50),
+    default=DEFAULT_K,
+    show_default=True,
+    help="How many chunks to return.",
+)
+@click.option("--project", default=None, help="Only search this project (case-insensitive).")
+@click.pass_context
+def search(ctx: click.Context, query: str, k: int, project: str | None) -> None:
+    """Show the chunks most relevant to QUERY, with citations. Costs one embedded text."""
+    config = _load_config_or_fail()
+    index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
+
+    # Checked before opening the store, which would otherwise create .chroma/.
+    if _existing_chunk_count(index_dir) == 0:
+        raise click.ClickException("There is no index yet - run `sbs index` first.")
+
+    factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    try:
+        results = retrieve(query, factory(config), ChunkStore(index_dir), k=k, project=project)
+    except (RetrievalError, EmbeddingError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(format_search_results(query, results))
 
 
 def main(argv: Sequence[str] | None = None) -> None:

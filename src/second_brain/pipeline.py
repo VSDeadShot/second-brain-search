@@ -21,7 +21,7 @@ from .config import Config
 from .discovery import DiscoveredDoc, discover_documents
 from .embedding import BatchCallback, Embedder, EmbeddingError
 from .embedding_cache import EmbeddingCache, cache_key
-from .store import ChunkStore
+from .store import ChunkStore, VectorSpaceMismatch
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,18 @@ def store_chunks(
     independently of the index - and texts already saved are not re-embedded.
     """
     chunks = collected.chunks
-    keys = _keys(chunks, embedder.cache_namespace)
+    namespace = embedder.cache_namespace
+
+    # Checked before embedding, so refusing costs no quota. A rebuild replaces
+    # the whole index, so switching embedders is legitimate there.
+    if not rebuild and store.namespace not in (None, namespace):
+        raise VectorSpaceMismatch(
+            f"This index was built with {store.namespace!r} but the embedder is "
+            f"{namespace!r}; mixing them would make search results meaningless. "
+            "Rebuild the index instead."
+        )
+
+    keys = _keys(chunks, namespace)
     known = cache.get_many(keys) if cache is not None and keys else {}
     reused = sum(1 for key in keys if key in known)
 
@@ -159,7 +170,9 @@ def store_chunks(
     vectors = [known[key] for key in keys]
 
     if rebuild:
-        store.reset()
+        store.reset(namespace=namespace)
+    elif store.namespace is None:
+        store.record_namespace(namespace)
     store.upsert(chunks, vectors)
 
     return replace(collected.report, embedded=len(pending_keys), reused=reused)

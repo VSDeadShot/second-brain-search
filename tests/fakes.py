@@ -58,6 +58,44 @@ class FakeEmbedder:
         return self._vector(text)
 
 
+_STOPWORDS = frozenset(
+    "a an and are as at be by did do for from how i in is it my of on or that the "
+    "this to was we what when where which with".split()
+)
+
+
+class KeywordEmbedder(FakeEmbedder):
+    """Bag-of-words vectors: each word hashes to a fixed dimension.
+
+    Texts sharing words land close together, so retrieval ranking is
+    predictable in tests. It proves the plumbing ranks by vector similarity;
+    it says nothing about how well Gemini's embeddings rank real questions.
+    """
+
+    def __init__(self, dimensions: int = 256) -> None:
+        super().__init__(dimensions)
+        self.query_calls: list[str] = []
+
+    @property
+    def cache_namespace(self) -> str:
+        return f"keyword|{self._dimensions}"
+
+    def _vector(self, text: str) -> list[float]:
+        import re
+
+        raw = [0.0] * self._dimensions
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            if word not in _STOPWORDS:
+                digest = hashlib.sha256(word.encode("utf-8")).digest()
+                raw[int.from_bytes(digest[:4], "big") % self._dimensions] += 1.0
+        norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+        return [v / norm for v in raw]
+
+    def embed_query(self, text: str) -> list[float]:
+        self.query_calls.append(text)
+        return self._vector(text)
+
+
 class FailingEmbedder(FakeEmbedder):
     """Fails the way a quota error or bad key would: at the embed call.
 

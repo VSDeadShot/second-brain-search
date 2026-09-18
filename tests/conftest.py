@@ -93,6 +93,28 @@ def corpus(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def knowledge(tmp_path: Path) -> Path:
+    """Three projects with distinctive vocabularies, for retrieval ranking tests."""
+    root = tmp_path / "knowledge"
+    make_file(
+        make_git_dir(root / "Macro Tracker") / "CLAUDE.md",
+        "# Photos\n\nMeal photo compression happens client side with a canvas, "
+        "shrinking each jpeg photo before upload so compression keeps payloads small.",
+    )
+    make_file(
+        make_git_dir(root / "Watch Tracker") / "EXPLAINER.md",
+        "# Caching\n\nThe caching layer keeps show metadata in redis with a ttl, "
+        "so repeated caching lookups skip the upstream api entirely.",
+    )
+    make_file(
+        make_git_dir(root / "RDBMS") / "README.md",
+        "# Storage\n\nThe storage engine writes pages to disk through a buffer pool "
+        "and a write ahead log so storage survives a crash.",
+    )
+    return root
+
+
+@pytest.fixture
 def doc_factory(tmp_path: Path):
     """Build a DiscoveredDoc without needing a real discovery walk."""
     from second_brain.discovery import DiscoveredDoc
