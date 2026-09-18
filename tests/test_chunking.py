@@ -1,5 +1,6 @@
 """Chunking: heading-aware, size-capped, with overlap."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -169,3 +170,64 @@ def test_chunk_index_stays_contiguous_after_filtering(doc_factory) -> None:
 
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
     assert len(chunks) == 2
+
+
+# --- heading context for embedding ----------------------------------------------
+#
+# Only the first piece of a split section contains its heading line; on the real
+# corpus 317 of 812 chunks (39%) carried no heading text at all, so a chunk deep
+# in "Caching" might never mention caching. Those chunks are embedded with their
+# heading path prepended. The displayed text is unchanged.
+
+
+def long_section(heading_lines: str) -> str:
+    paragraph = "A paragraph about the behaviour that runs on for a while. " * 3
+    return heading_lines + "\n\n" + "\n\n".join([paragraph] * 12)
+
+
+def test_headless_pieces_embed_with_their_heading_path(doc_factory) -> None:
+    text = long_section("# Architecture\n\n## Caching")
+
+    chunks = chunk_document(doc_factory(), text)
+    headless = [c for c in chunks if not c.text.lstrip().startswith("#")]
+
+    assert headless, "fixture must produce a split piece without its heading"
+    for chunk in headless:
+        assert chunk.embed_text == f"Architecture > Caching\n\n{chunk.text}"
+
+
+def test_pieces_that_start_with_their_heading_embed_as_is(doc_factory) -> None:
+    chunks = chunk_document(doc_factory(), long_section("# Architecture\n\n## Caching"))
+    headed = [c for c in chunks if c.text.lstrip().startswith("#")]
+
+    assert headed
+    assert all(c.embed_text == c.text for c in headed)
+
+
+def test_display_text_is_never_prefixed(doc_factory) -> None:
+    chunks = chunk_document(doc_factory(), long_section("# Architecture\n\n## Caching"))
+
+    assert not any(c.text.startswith("Architecture > Caching") for c in chunks)
+
+
+def test_text_before_any_heading_embeds_as_is(doc_factory) -> None:
+    text = "An opening paragraph that sits above every heading in the file.\n\n# Later\n\nbody"
+
+    preamble = chunk_document(doc_factory(), text, min_chars=0)[0]
+
+    assert preamble.heading_path == ""
+    assert preamble.embed_text == preamble.text
+
+
+def test_content_hash_covers_the_embedded_text(doc_factory) -> None:
+    """The hash is the embedding-cache key: it must change when what is embedded
+    changes, including a heading rename over an identical body."""
+    before = chunk_document(doc_factory(), long_section("# Architecture\n\n## Caching"))
+    after = chunk_document(doc_factory(), long_section("# Architecture\n\n## Memoisation"))
+
+    old = next(c for c in before if not c.text.lstrip().startswith("#"))
+    new = next(c for c in after if c.chunk_index == old.chunk_index)
+
+    assert old.text == new.text
+    assert old.content_hash != new.content_hash
+    assert old.content_hash == hashlib.sha256(old.embed_text.encode("utf-8")).hexdigest()

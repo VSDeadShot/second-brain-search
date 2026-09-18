@@ -137,7 +137,7 @@ def store_chunks(
     pending: dict[str, str] = {}
     for key, chunk in zip(keys, chunks):
         if key not in known:
-            pending.setdefault(key, chunk.text)
+            pending.setdefault(key, chunk.embed_text)
     pending_keys = list(pending)
 
     def save_batch(offset: int, batch_vectors: list[list[float]]) -> None:

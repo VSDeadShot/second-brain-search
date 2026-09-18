@@ -3,6 +3,11 @@
 Heading-aware: sections defined by ATX headings become chunks, and anything
 over the size cap is split with overlap. The heading path rides along so a
 citation can point at a section rather than just a file.
+
+Only the first piece of a split section contains its heading line - on the real
+corpus 39% of chunks carried no heading text at all. Those are embedded as
+`heading_path + text` (`embed_text`), so a piece deep inside "Caching" is still
+about caching to the embedding model. `text` stays unprefixed for display.
 """
 
 from __future__ import annotations
@@ -35,8 +40,18 @@ class Chunk:
     heading_path: str
     chunk_index: int
     text: str
+    """What is stored and shown."""
+    embed_text: str
+    """What is embedded: `text`, with the heading path prepended if `text` lacks it."""
     content_hash: str
+    """sha256 of `embed_text` - the embedding-cache key, so it tracks what was embedded."""
     mtime: float
+
+
+def _embed_text(heading_path: str, piece: str) -> str:
+    if heading_path and not piece.lstrip().startswith("#"):
+        return f"{heading_path}\n\n{piece}"
+    return piece
 
 
 @dataclass
@@ -146,6 +161,7 @@ def chunk_document(
     chunks: list[Chunk] = []
     for index, (heading_path, piece) in enumerate(kept):
         identity = f"{doc.project}|{doc.rel_path}|{index}".encode()
+        embed_text = _embed_text(heading_path, piece)
         chunks.append(
             Chunk(
                 chunk_id=hashlib.sha256(identity).hexdigest(),
@@ -155,7 +171,8 @@ def chunk_document(
                 heading_path=heading_path,
                 chunk_index=index,
                 text=piece,
-                content_hash=hashlib.sha256(piece.encode("utf-8")).hexdigest(),
+                embed_text=embed_text,
+                content_hash=hashlib.sha256(embed_text.encode("utf-8")).hexdigest(),
                 mtime=doc.mtime,
             )
         )

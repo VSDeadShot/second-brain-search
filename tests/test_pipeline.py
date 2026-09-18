@@ -374,6 +374,28 @@ def test_without_a_cache_every_chunk_counts_as_embedded(tmp_path: Path, corpus: 
     assert (report.embedded, report.reused) == (len(collected.chunks), 0)
 
 
+def test_embedder_receives_heading_prefixed_text_but_the_store_keeps_display_text(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    paragraph = "A paragraph about caching behaviour that runs on for a while. " * 3
+    make_file(
+        make_git_dir(root / "Solo") / "README.md",
+        "# Architecture\n\n## Caching\n\n" + "\n\n".join([paragraph] * 12),
+    )
+    collected = collect_chunks(config_for(root))
+    headless = next(c for c in collected.chunks if not c.text.lstrip().startswith("#"))
+    embedder = FakeEmbedder()
+    store = ChunkStore(tmp_path / "chroma")
+
+    store_chunks(collected, embedder, store)
+
+    sent = [text for call in embedder.embed_calls for text in call]
+    assert headless.embed_text in sent
+    assert headless.text not in sent
+    assert store.get(headless.chunk_id)["text"] == headless.text
+
+
 def test_collect_chunks_matches_what_indexing_stores(tmp_path: Path, corpus: Path) -> None:
     """The dry run relies on this: same chunks, no embedder, no store."""
     config = config_for(corpus)
