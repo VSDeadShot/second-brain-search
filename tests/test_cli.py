@@ -8,6 +8,7 @@ touches the real .chroma/ or data/, or calls the Gemini API.
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tomllib
 from pathlib import Path
@@ -524,6 +525,125 @@ def test_search_daily_quota_is_clean(tmp_path: Path, knowledge: Path) -> None:
     assert result.exit_code != 0
     assert "daily limit" in result.output
     assert "Traceback" not in result.output
+
+
+# --- sbs eval -------------------------------------------------------------------
+
+
+EVAL_SUITE = """
+version = 1
+
+[[question]]
+id = "q1"
+category = "cross-project"
+text = "caching redis ttl"
+expected_projects = ["Watch Tracker"]
+
+[[question]]
+id = "q2"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+"""
+
+
+def write_suite(tmp_path: Path) -> Path:
+    path = tmp_path / "suite.toml"
+    path.write_text(EVAL_SUITE, encoding="utf-8")
+    return path
+
+
+def test_eval_writes_a_timestamped_report_and_prints_a_summary(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    out = tmp_path / "reports"
+
+    result = run(
+        ["eval", "--fixture", str(write_suite(tmp_path)), "--out", str(out)],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    assert result.exit_code == 0, result.output
+    reports = list(out.glob("*.json"))
+    assert len(reports) == 1
+    payload = json.loads(reports[0].read_text(encoding="utf-8"))
+    assert len(payload["questions"]) == 2
+    assert "2 questions" in result.output
+    assert str(reports[0]) in result.output
+
+
+def test_eval_states_its_quota_cost_before_running(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = run(
+        ["eval", "--fixture", str(write_suite(tmp_path)), "--out", str(tmp_path / "r")],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    assert "2 embedded texts" in result.output
+
+
+def test_eval_reports_found_and_missing_projects(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    out = tmp_path / "reports"
+
+    run(
+        ["eval", "--fixture", str(write_suite(tmp_path)), "--out", str(out)],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    q1 = json.loads(next(out.glob("*.json")).read_text(encoding="utf-8"))["questions"][0]
+    assert q1["found"] == ["Watch Tracker"]
+    assert q1["missing"] == []
+
+
+def test_eval_without_an_index_is_clean_and_creates_nothing(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = tmp_path / "chroma"
+    out = tmp_path / "reports"
+
+    result = run(
+        ["eval", "--fixture", str(write_suite(tmp_path)), "--out", str(out)],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=must_not_embed,
+    )
+
+    assert result.exit_code != 0
+    assert "sbs index" in result.output
+    assert "Traceback" not in result.output
+    assert not index_dir.exists()
+    assert not out.exists()
+
+
+def test_eval_with_a_bad_fixture_path_is_clean(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = run(
+        ["eval", "--fixture", str(tmp_path / "nope.toml"), "--out", str(tmp_path / "r")],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+
+
+def test_eval_defaults_to_the_committed_suite() -> None:
+    from second_brain.cli import DEFAULT_EVAL_SUITE, DEFAULT_EVAL_OUT_DIR
+
+    assert DEFAULT_EVAL_SUITE == REPO_ROOT / "eval" / "retrieval_v1.toml"
+    assert DEFAULT_EVAL_SUITE.is_file()
+    assert DEFAULT_EVAL_OUT_DIR.parent == REPO_ROOT / "data"
 
 
 # --- failure wording ------------------------------------------------------------

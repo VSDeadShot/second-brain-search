@@ -34,7 +34,14 @@ from .embedding import (
 )
 from .embedding_cache import EmbeddingCache
 from .pipeline import EmbeddingPlan, IndexReport, collect_chunks, embedding_plan, store_chunks
-from .retrieval import DEFAULT_K, RetrievalError, RetrievedChunk, retrieve
+from .evaluation import EvalSuiteError, load_eval_suite, report_to_dict, run_eval
+from .retrieval import (
+    DEFAULT_ANSWER_K,
+    DEFAULT_K,
+    RetrievalError,
+    RetrievedChunk,
+    retrieve,
+)
 from .store import ChunkStore
 
 SNIPPET_CHARS = 240
@@ -43,6 +50,10 @@ SNIPPET_CHARS = 240
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INDEX_DIR = _REPO_ROOT / ".chroma"
 DEFAULT_CACHE_PATH = _REPO_ROOT / "data" / "embedding_cache.sqlite"
+# The suite is product data, not a test fixture: `sbs eval` reads it. Reports go
+# under data/, which is gitignored.
+DEFAULT_EVAL_SUITE = _REPO_ROOT / "eval" / "retrieval_v1.toml"
+DEFAULT_EVAL_OUT_DIR = _REPO_ROOT / "data" / "eval"
 
 EmbedderFactory = Callable[[Config], Embedder]
 
@@ -341,6 +352,80 @@ def search(ctx: click.Context, query: str, k: int, project: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(format_search_results(query, results))
+
+
+@cli.command("eval")
+@click.option(
+    "--fixture",
+    "fixture",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=f"Eval suite TOML. Default: {DEFAULT_EVAL_SUITE}",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=f"Where to write the JSON report. Default: {DEFAULT_EVAL_OUT_DIR}",
+)
+@click.option(
+    "-k", "k", type=click.IntRange(1, 50), default=DEFAULT_ANSWER_K, show_default=True,
+    help="Passages retrieved per question.",
+)
+@click.pass_context
+def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | None, k: int) -> None:
+    """Run the retrieval eval suite and write a JSON report.
+
+    Retrieval only - nothing is generated. Costs one embedded text per question.
+    """
+    config = _load_config_or_fail()
+    index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
+    suite_path = Path(fixture) if fixture is not None else DEFAULT_EVAL_SUITE
+    reports_dir = Path(out_dir) if out_dir is not None else DEFAULT_EVAL_OUT_DIR
+
+    # Checked before the store is opened, which would create .chroma/.
+    if _existing_chunk_count(index_dir) == 0:
+        raise click.ClickException("There is no index yet - run `sbs index` first.")
+
+    try:
+        suite = load_eval_suite(suite_path)
+    except EvalSuiteError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"{suite.path.name}: {len(suite.questions)} questions")
+    click.echo(f"This spends {len(suite.questions)} embedded texts of today's quota.\n")
+
+    factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    try:
+        report = run_eval(suite, factory(config), ChunkStore(index_dir), k=k)
+    except (RetrievalError, EmbeddingError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    for outcome in report.outcomes:
+        if outcome.expects_no_answer:
+            best = f"{outcome.top_score:.2f}" if outcome.top_score is not None else "none"
+            verdict = f"expects no answer (top score {best})"
+        elif outcome.missing:
+            verdict = f"missing {', '.join(outcome.missing)}"
+        else:
+            verdict = f"found {', '.join(outcome.found)}"
+        click.echo(f"  {outcome.question.id:28} {verdict}")
+
+    summary = report.summary
+    click.echo(
+        f"\n{summary['questions']} questions, {summary['expecting_an_answer']} expecting an answer; "
+        f"every expected project found in {summary['all_expected_found']}, "
+        f"at least one in {summary['any_expected_found']}."
+    )
+
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = report.generated_at.strftime("%Y%m%dT%H%M%SZ")
+    destination = reports_dir / f"retrieval-v{suite.version}-{stamp}.json"
+    destination.write_text(
+        json.dumps(report_to_dict(report), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    click.echo(f"Report: {destination}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
