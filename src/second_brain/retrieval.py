@@ -46,6 +46,8 @@ class RetrievedChunk:
     content_hash: str
     mtime: float
     """The file's modification time when it was indexed - freshness for citations."""
+    path: str
+    """Absolute path on disk. Citations date the file by asking git about it."""
 
 
 def _resolve_project(store: ChunkStore, project: str) -> str:
@@ -104,6 +106,7 @@ def retrieve(
                 score=1.0 - row["distance"],
                 content_hash=row["content_hash"],
                 mtime=row["mtime"],
+                path=row["path"],
             )
         )
         if len(results) == k:

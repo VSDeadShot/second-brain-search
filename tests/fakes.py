@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -252,3 +253,79 @@ class StubModels:
 @dataclass
 class StubClient:
     models: StubModels
+
+
+@dataclass
+class StubGenerationResponse:
+    text: str | None
+
+
+@dataclass
+class StubGenerationModels:
+    """Stands in for genai.Client().models for generate_content."""
+
+    text: str = '{"answerable": true, "answer": "Because [1].", "citations": [1]}'
+    raises: Exception | None = None
+    calls: list[dict] = field(default_factory=list)
+
+    def generate_content(self, *, model, contents, config=None):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        if self.raises is not None:
+            raise self.raises
+        return StubGenerationResponse(text=self.text)
+
+
+@dataclass
+class StubGenerationClient:
+    models: StubGenerationModels
+
+
+def generation_daily_quota_error() -> Exception:
+    """A per-day 429 for a generation model - 500/day on the Lite free tier."""
+    return rate_limit_error(
+        "34s",
+        quota_id="GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        quota_value="500",
+    )
+
+
+class FakeGenerator:
+    """A Generator that replays a scripted answer. Never touches the network."""
+
+    def __init__(self, answer=None, *, model: str = "fake-model", raises: Exception | None = None) -> None:
+        from second_brain.generation import RawAnswer
+
+        self._answer = answer if answer is not None else RawAnswer(True, "Because [1].", (1,))
+        self._model = model
+        self._raises = raises
+        self.prompts: list[str] = []
+        self.passages: list[list] = []
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def generate(self, question: str, passages):
+        from second_brain.generation import build_prompt
+
+        self.prompts.append(build_prompt(question, passages))
+        self.passages.append(list(passages))
+        if self._raises is not None:
+            raise self._raises
+        return self._answer
+
+
+class FakeRunner:
+    """Stands in for subprocess.run: records the call, replays a scripted result."""
+
+    def __init__(self, stdout: str = "2026-08-18\n", returncode: int = 0, raises: Exception | None = None) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.raises = raises
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.raises is not None:
+            raise self.raises
+        return subprocess.CompletedProcess(args, self.returncode, self.stdout, "")

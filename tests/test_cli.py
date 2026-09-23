@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -18,12 +19,19 @@ from click.testing import CliRunner
 
 from second_brain.cli import (
     DEFAULT_CACHE_PATH,
+    _gemini_generator,
     cli,
     force_utf8_streams,
     format_index_report,
     main,
 )
-from second_brain.config import Config, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
+from second_brain.config import (
+    Config,
+    DEFAULT_EXCLUDE_DIRS,
+    DEFAULT_INCLUDE_PATTERNS,
+    load_config,
+)
+from second_brain.generation import GenerationDailyQuotaExceeded, RawAnswer
 from second_brain.embedding import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DIMENSIONS,
@@ -40,6 +48,7 @@ from second_brain.embedding import DailyQuotaExceeded
 
 from fakes import (
     FailingEmbedder,
+    FakeGenerator,
     FakeClock,
     FakeEmbedder,
     KeywordEmbedder,
@@ -56,10 +65,20 @@ def cache_path_for(index_dir: Path) -> Path:
     return index_dir.parent / "embedding_cache.sqlite"
 
 
-def run(args: list[str], *, scan_root: Path, index_dir: Path, factory=None, api_key="fake-key"):
+def run(
+    args: list[str],
+    *,
+    scan_root: Path,
+    index_dir: Path,
+    factory=None,
+    generator=None,
+    api_key="fake-key",
+):
     obj: dict = {"index_dir": index_dir, "cache_path": cache_path_for(index_dir)}
     if factory is not None:
         obj["embedder_factory"] = factory
+    if generator is not None:
+        obj["generator_factory"] = generator
     return CliRunner().invoke(
         cli,
         args,
@@ -74,6 +93,10 @@ def fake_factory(config):
 
 def must_not_embed(config):
     raise AssertionError("embedder must not be built")
+
+
+def must_not_generate(config):
+    raise AssertionError("generator must not be built")
 
 
 # --- sbs index -----------------------------------------------------------------
@@ -752,3 +775,213 @@ def test_installed_sbs_script_points_at_main() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["scripts"]["sbs"] == "second_brain.cli:main"
+
+
+# --- sbs ask --------------------------------------------------------------------
+
+
+def generator_factory(answer=None, *, model="fake-model", raises=None):
+    def factory(config):
+        return FakeGenerator(answer, model=model, raises=raises)
+
+    return factory
+
+
+def ask(args: list[str], *, knowledge: Path, index_dir: Path, generator=None, factory=keyword_factory):
+    return run(
+        ["ask", *args],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=factory,
+        generator=generator if generator is not None else generator_factory(),
+    )
+
+
+def test_ask_prints_the_answer_and_where_it_came_from(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    answer = RawAnswer(True, "Compression happens client side [1].", (1,))
+
+    result = ask(
+        ["how did I handle photo compression"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+        generator=generator_factory(answer),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Compression happens client side [1]." in result.output
+    assert "Sources:" in result.output
+    assert "[1] Macro Tracker / CLAUDE.md > Photos" in result.output
+
+
+def test_ask_dates_each_source_and_says_where_the_date_came_from(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    """The fixtures are not real repos, so git cannot date them and mtime is used."""
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["photo compression"], knowledge=knowledge, index_dir=index_dir)
+
+    assert "(mtime " in result.output
+
+
+def test_ask_warns_when_a_cited_file_changed_since_indexing(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    edited = knowledge / "Macro Tracker" / "CLAUDE.md"
+    later = edited.stat().st_mtime + 3600
+    os.utime(edited, (later, later))
+
+    result = ask(["photo compression"], knowledge=knowledge, index_dir=index_dir)
+
+    assert "changed since indexed" in result.output
+
+
+def test_ask_refusal_shows_the_closest_passages_labelled_not_an_answer(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(
+        ["how did I set up kubernetes"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+        generator=generator_factory(RawAnswer(False, "", ())),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "not an answer" in result.output
+    assert "Sources:" not in result.output
+
+
+def test_ask_never_prints_an_answer_that_cites_nothing(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    uncited = RawAnswer(True, "It uses a canvas, obviously.", ())
+
+    result = ask(
+        ["photo compression"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+        generator=generator_factory(uncited),
+    )
+
+    assert "It uses a canvas, obviously." not in result.output
+    assert "cited no passage" in result.output
+
+
+def test_ask_show_context_prints_every_retrieved_passage(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["caching", "--show-context"], knowledge=knowledge, index_dir=index_dir)
+
+    assert "Context" in result.output
+    assert "RDBMS / README.md" in result.output
+
+
+def test_ask_without_show_context_stays_short(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["caching"], knowledge=knowledge, index_dir=index_dir)
+
+    assert result.exit_code == 0, result.output
+    assert "Sources:" in result.output
+    assert "Context" not in result.output
+
+
+def test_ask_reports_the_model_that_answered(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(
+        ["caching"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+        generator=generator_factory(model="gemini-3.6-flash"),
+    )
+
+    assert "gemini-3.6-flash" in result.output
+
+
+def test_ask_respects_k(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["caching", "-k", "1", "--show-context"], knowledge=knowledge, index_dir=index_dir)
+
+    assert "1 passage" in result.output
+
+
+def test_ask_can_be_limited_to_a_project(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(
+        ["caching", "--project", "RDBMS", "--show-context"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+    )
+
+    assert "Watch Tracker" not in result.output
+    assert "RDBMS" in result.output
+
+
+def test_ask_without_an_index_is_clean_and_generates_nothing(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = tmp_path / "chroma"
+
+    result = run(
+        ["ask", "caching"],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=must_not_embed,
+        generator=must_not_generate,
+    )
+
+    assert result.exit_code != 0
+    assert "sbs index" in result.output
+    assert "Traceback" not in result.output
+    assert not index_dir.exists()
+
+
+def test_ask_when_the_daily_generation_quota_is_spent_is_clean(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    spent = GenerationDailyQuotaExceeded(
+        "Gemini free-tier daily limit of 500 requests for gemini-3.5-flash-lite is used up."
+    )
+
+    result = ask(
+        ["caching"],
+        knowledge=knowledge,
+        index_dir=index_dir,
+        generator=generator_factory(raises=spent),
+    )
+
+    assert result.exit_code != 0
+    assert "daily limit of 500" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_ask_unknown_project_is_clean(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["caching", "--project", "Nope"], knowledge=knowledge, index_dir=index_dir)
+
+    assert result.exit_code != 0
+    assert "Watch Tracker" in result.output  # the refusal lists what does exist
+    assert "Traceback" not in result.output
+
+
+def test_the_real_generator_is_built_from_the_configured_model(tmp_path: Path) -> None:
+    scan = tmp_path / "projects"
+    scan.mkdir()
+    config = load_config(
+        project_root=tmp_path,
+        env={
+            "SBS_SCAN_ROOT": str(scan),
+            "SBS_GENERATION_MODEL": "gemini-3.6-flash",
+            "GEMINI_API_KEY": "fake-key",
+        },
+    )
+
+    assert _gemini_generator(config).model == "gemini-3.6-flash"

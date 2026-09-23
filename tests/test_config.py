@@ -100,3 +100,39 @@ def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="include_pattern"):
         load_config(project_root=tmp_path, env={"SBS_SCAN_ROOT": str(scan)})
+
+
+# --- the generation model -------------------------------------------------------
+
+
+def test_the_generation_model_defaults_to_the_one_with_the_headroom(tmp_path: Path) -> None:
+    scan = tmp_path / "projects"
+    scan.mkdir()
+
+    cfg = load_config(project_root=tmp_path, env={"SBS_SCAN_ROOT": str(scan)})
+
+    assert cfg.generation_model == "gemini-3.5-flash-lite"
+
+
+def test_the_generation_model_can_be_changed_from_the_environment(tmp_path: Path) -> None:
+    """Swapping to the documented fallback is one line in .env, not a code change."""
+    scan = tmp_path / "projects"
+    scan.mkdir()
+
+    cfg = load_config(
+        project_root=tmp_path,
+        env={"SBS_SCAN_ROOT": str(scan), "SBS_GENERATION_MODEL": "gemini-3.6-flash"},
+    )
+
+    assert cfg.generation_model == "gemini-3.6-flash"
+
+
+def test_a_blank_generation_model_falls_back_to_the_default(tmp_path: Path) -> None:
+    scan = tmp_path / "projects"
+    scan.mkdir()
+
+    cfg = load_config(
+        project_root=tmp_path, env={"SBS_SCAN_ROOT": str(scan), "SBS_GENERATION_MODEL": "   "}
+    )
+
+    assert cfg.generation_model == "gemini-3.5-flash-lite"

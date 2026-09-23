@@ -63,6 +63,7 @@ def chunk(project: str, rel_path: str = "README.md", score: float = 0.7) -> Retr
         score=score,
         content_hash="h",
         mtime=1.0,
+        path=f"/{project}/{rel_path}",
     )
 
 

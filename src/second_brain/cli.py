@@ -19,8 +19,10 @@ from typing import Any
 
 import click
 
+from .answering import Answer, Citation, answer_question
 from .config import Config, ConfigError, load_config
 from .discovery import DiscoveredDoc, discover_documents
+from .generation import GeminiGenerator, GenerationError, Generator
 from .embedding import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DIMENSIONS,
@@ -45,6 +47,8 @@ from .retrieval import (
 from .store import ChunkStore
 
 SNIPPET_CHARS = 240
+# How many of the closest passages a refusal shows, labelled as not an answer.
+REFUSAL_PASSAGES = 3
 
 # src/second_brain/cli.py -> repo root. Both gitignored.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +60,7 @@ DEFAULT_EVAL_SUITE = _REPO_ROOT / "eval" / "retrieval_v1.toml"
 DEFAULT_EVAL_OUT_DIR = _REPO_ROOT / "data" / "eval"
 
 EmbedderFactory = Callable[[Config], Embedder]
+GeneratorFactory = Callable[[Config], Generator]
 
 
 def force_utf8_streams(*streams: Any) -> None:
@@ -426,6 +431,98 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
         json.dumps(report_to_dict(report), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     click.echo(f"Report: {destination}")
+
+
+def _gemini_generator(config: Config) -> Generator:
+    return GeminiGenerator(api_key=config.gemini_api_key, model=config.generation_model)
+
+
+def _source_line(citation: Citation) -> str:
+    dated = f"{citation.date_source} {citation.date}" if citation.date != "unknown" else "undated"
+    if citation.changed_since_indexed:
+        dated += ", changed since indexed"
+    return f"  [{citation.number}] {_citation(citation.chunk)}  ({dated})"
+
+
+def _passage_lines(passages: Sequence[RetrievedChunk], *, start: int = 1) -> list[str]:
+    lines = []
+    for rank, passage in enumerate(passages[start - 1 :], start=start):
+        lines.append(f"  {rank}. [{passage.score:.2f}] {_citation(passage)}")
+        lines.append(f"     {_snippet(passage.text)}")
+    return lines
+
+
+def format_answer(answer: Answer, *, show_context: bool = False) -> str:
+    lines: list[str] = []
+
+    if answer.answerable:
+        lines += [answer.text, "", "Sources:"]
+        lines += [_source_line(c) for c in answer.citations]
+    else:
+        lines += [f'No answer in your documentation for: "{answer.question}"', ""]
+        if answer.passages:
+            # Shown so a refusal can be checked rather than just believed - and
+            # labelled, because these passages are what did NOT answer it.
+            lines += ["Closest passages (not an answer):"]
+            lines += _passage_lines(answer.passages[:REFUSAL_PASSAGES])
+
+    if answer.warnings:
+        lines += [""] + [f"Warning: {w}" for w in answer.warnings]
+
+    if show_context:
+        lines += ["", f"Context ({len(answer.passages)} passages retrieved):"]
+        lines += _passage_lines(answer.passages)
+
+    cited = len(answer.citations)
+    lines += [
+        "",
+        f"{answer.model} - {len(answer.passages)} passages retrieved, {cited} cited",
+    ]
+    return "\n".join(lines)
+
+
+@cli.command()
+@click.argument("question")
+@click.option(
+    "-k",
+    "k",
+    type=click.IntRange(1, 50),
+    default=DEFAULT_ANSWER_K,
+    show_default=True,
+    help="How many passages to give the model.",
+)
+@click.option("--project", default=None, help="Only use this project (case-insensitive).")
+@click.option("--show-context", is_flag=True, help="Also print every passage retrieved.")
+@click.pass_context
+def ask(ctx: click.Context, question: str, k: int, project: str | None, show_context: bool) -> None:
+    """Answer QUESTION from your documentation, with citations.
+
+    Costs one embedded text and one generation request. An answer that cites
+    nothing is shown as a refusal - there would be nothing to check it against.
+    """
+    config = _load_config_or_fail()
+    index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
+
+    # Checked before opening the store, which would otherwise create .chroma/.
+    if _existing_chunk_count(index_dir) == 0:
+        raise click.ClickException("There is no index yet - run `sbs index` first.")
+
+    embedder_factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    generator_factory: GeneratorFactory = ctx.obj.get("generator_factory", _gemini_generator)
+
+    try:
+        answer = answer_question(
+            question,
+            embedder_factory(config),
+            ChunkStore(index_dir),
+            generator_factory(config),
+            k=k,
+            project=project,
+        )
+    except (RetrievalError, EmbeddingError, GenerationError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(format_answer(answer, show_context=show_context))
 
 
 def main(argv: Sequence[str] | None = None) -> None:

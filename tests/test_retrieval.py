@@ -115,6 +115,17 @@ def test_results_carry_the_full_citation(indexed) -> None:
     assert top.content_hash
 
 
+def test_results_carry_the_absolute_path_for_dating_the_file(indexed) -> None:
+    """Freshness shells out to git, which needs a real path - project/rel_path
+    alone cannot say where on disk the file lives."""
+    store, embedder = indexed
+
+    top = retrieve("redis caching ttl", embedder, store, k=1)[0]
+
+    assert Path(top.path).is_file()
+    assert Path(top.path).name == "EXPLAINER.md"
+
+
 def test_results_show_display_text_not_the_embedded_prefix(tmp_path: Path) -> None:
     root = tmp_path / "root"
     paragraph = "Caching details that run on for a good while in this section. " * 3

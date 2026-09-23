@@ -53,6 +53,13 @@ DEFAULT_EXCLUDE_PATHS: tuple[str, ...] = (
     "Second Brain/CLAUDE_SUMMARY.md",
 )
 
+# Generation models. Lite is the default for its free-tier headroom: 500 requests
+# a day and 15 a minute on this project, against 20 a day and 5 a minute for the
+# 3.x Flash models. SBS_GENERATION_MODEL switches to the fallback if Lite's
+# answers turn out weak.
+DEFAULT_GENERATION_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_GENERATION_MODEL = "gemini-3.6-flash"
+
 _LIST_FIELDS = ("include_patterns", "include_dirs", "exclude_dirs", "exclude_paths")
 
 
@@ -64,6 +71,7 @@ class Config:
     include_dirs: tuple[str, ...]
     exclude_dirs: tuple[str, ...]
     exclude_paths: tuple[str, ...]
+    generation_model: str = DEFAULT_GENERATION_MODEL
 
 
 def _repo_root() -> Path:
@@ -137,6 +145,7 @@ def load_config(
         include_dirs=DEFAULT_INCLUDE_DIRS,
         exclude_dirs=DEFAULT_EXCLUDE_DIRS,
         exclude_paths=DEFAULT_EXCLUDE_PATHS,
+        generation_model=(env.get("SBS_GENERATION_MODEL") or "").strip() or DEFAULT_GENERATION_MODEL,
     )
 
     for name in ("config.toml", "config.local.toml"):
