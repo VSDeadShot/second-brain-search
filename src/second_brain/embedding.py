@@ -29,6 +29,14 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from .gemini_errors import (
+    RATE_LIMIT_MARGIN_SECONDS,
+    RATE_WINDOW_SECONDS,
+    daily_quota_limit,
+    is_unexplained_rate_limit,
+    rate_limit_delay,
+)
+
 EMBEDDING_MODEL = "gemini-embedding-001"
 DEFAULT_DIMENSIONS = 768
 DEFAULT_BATCH_SIZE = 100
@@ -43,10 +51,6 @@ FREE_TIER_TOKENS_PER_MINUTE = 30_000
 # most 40% of the limit: back-to-back batches then total <= 80%.
 TOKEN_BUDGET_PER_MINUTE = FREE_TIER_TOKENS_PER_MINUTE * 2 // 5  # 12,000
 CHARS_PER_TOKEN_ESTIMATE = 4
-PACING_WINDOW_SECONDS = 60
-# Added to the server's retryDelay so the retry lands just after the window
-# clears rather than racing its boundary.
-RATE_LIMIT_MARGIN_SECONDS = 1.0
 
 BatchCallback = Callable[[int, int], None]
 # (offset into the input texts, normalised vectors for that batch)
@@ -128,65 +132,7 @@ def estimate_embedding_seconds(
         items_per_minute=items_per_minute,
         tokens_per_minute=tokens_per_minute,
     )
-    return max(len(batches) - 1, 0) * PACING_WINDOW_SECONDS
-
-
-def _error_details(exc: Exception) -> list[dict]:
-    """The google.rpc detail entries of a google-genai ClientError, if any."""
-    body = getattr(exc, "details", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    details = error.get("details", []) if isinstance(error, dict) else []
-    return [d for d in details if isinstance(d, dict)]
-
-
-def _has_detail(exc: Exception, type_suffix: str) -> bool:
-    return any(str(d.get("@type", "")).endswith(type_suffix) for d in _error_details(exc))
-
-
-def _daily_quota_limit(exc: Exception) -> str | None:
-    """The daily limit (e.g. "1000") if `exc` is a per-day quota 429, else None.
-
-    The live per-day 429 still carried a ~58s RetryInfo delay, so the retry
-    delay cannot tell the two apart - the QuotaFailure quotaId can
-    ("...PerDay..." vs "...PerMinute...").
-    """
-    if getattr(exc, "code", None) != 429:
-        return None
-    for detail in _error_details(exc):
-        if not str(detail.get("@type", "")).endswith("QuotaFailure"):
-            continue
-        for violation in detail.get("violations", []):
-            if isinstance(violation, dict) and "PerDay" in str(violation.get("quotaId", "")):
-                return str(violation.get("quotaValue") or "the daily")
-    return None
-
-
-def _is_unexplained_rate_limit(exc: Exception) -> bool:
-    """A 429 with neither a QuotaFailure nor a RetryInfo - the bare 429 seen live."""
-    return (
-        getattr(exc, "code", None) == 429
-        and not _has_detail(exc, "QuotaFailure")
-        and not _has_detail(exc, "RetryInfo")
-    )
-
-
-def _rate_limit_delay(exc: Exception) -> float | None:
-    """Seconds the server asked us to wait, if `exc` is a 429; otherwise None.
-
-    google-genai raises ClientError with `.code` and the response JSON in
-    `.details`; the delay lives in a google.rpc.RetryInfo entry as e.g. "45s".
-    A 429 without a parseable RetryInfo waits a full window.
-    """
-    if getattr(exc, "code", None) != 429:
-        return None
-    for detail in _error_details(exc):
-        if str(detail.get("@type", "")).endswith("RetryInfo"):
-            raw = str(detail.get("retryDelay", "")).strip().removesuffix("s")
-            try:
-                return float(raw)
-            except ValueError:
-                break
-    return float(PACING_WINDOW_SECONDS)
+    return max(len(batches) - 1, 0) * RATE_WINDOW_SECONDS
 
 
 def _normalise(vector: list[float]) -> list[float]:
@@ -287,7 +233,7 @@ class GeminiEmbedder:
     def _wait_for_next_window(self) -> None:
         if self._items_per_minute is None or self._window_started is None:
             return
-        remaining = PACING_WINDOW_SECONDS - (self._clock() - self._window_started)
+        remaining = RATE_WINDOW_SECONDS - (self._clock() - self._window_started)
         if remaining > 0:
             self._sleep(remaining)
 
@@ -303,14 +249,14 @@ class GeminiEmbedder:
                     config=self._config(task_type),
                 )
             except Exception as exc:  # the SDK raises a family of transport errors
-                daily_limit = _daily_quota_limit(exc)
+                daily_limit = daily_quota_limit(exc)
                 if daily_limit is not None:
                     raise DailyQuotaExceeded(
                         f"Gemini's free-tier daily limit of {daily_limit} embedded texts is "
                         "used up. It resets at midnight Pacific time - run `sbs index` again "
                         "after that."
                     ) from exc
-                if _is_unexplained_rate_limit(exc):
+                if is_unexplained_rate_limit(exc):
                     tokens = sum(estimate_tokens(t) for t in texts)
                     raise UnexplainedRateLimit(
                         f"Gemini refused a batch of {len(texts)} texts (~{tokens} estimated "
@@ -319,7 +265,7 @@ class GeminiEmbedder:
                     ) from exc
                 last_error = exc
                 if attempt < self._max_retries:
-                    server_delay = _rate_limit_delay(exc)
+                    server_delay = rate_limit_delay(exc)
                     if server_delay is not None:
                         self._sleep(server_delay + RATE_LIMIT_MARGIN_SECONDS)
                     else:

@@ -10,8 +10,8 @@ import pytest
 from second_brain.embedding import (
     EMBEDDING_MODEL,
     FREE_TIER_ITEMS_PER_MINUTE,
-    PACING_WINDOW_SECONDS,
     RATE_LIMIT_MARGIN_SECONDS,
+    RATE_WINDOW_SECONDS,
     FREE_TIER_TOKENS_PER_MINUTE,
     TOKEN_BUDGET_PER_MINUTE,
     DailyQuotaExceeded,
@@ -198,7 +198,6 @@ def texts(n: int) -> list[str]:
 
 def test_free_tier_limit_is_100_texts_per_minute() -> None:
     assert FREE_TIER_ITEMS_PER_MINUTE == 100
-    assert PACING_WINDOW_SECONDS == 60
 
 
 def test_batches_never_exceed_the_per_minute_text_limit() -> None:
@@ -276,7 +275,7 @@ def test_rate_limit_without_retry_info_waits_a_full_window() -> None:
 
     paced_embedder(models, clock).embed_documents(texts(1))
 
-    assert clock.sleeps == [PACING_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
+    assert clock.sleeps == [RATE_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
 
 
 def test_other_errors_keep_exponential_backoff() -> None:
@@ -580,7 +579,7 @@ def test_a_named_per_minute_quota_without_a_delay_still_waits() -> None:
 
     paced_embedder(models, clock).embed_documents(texts(1))
 
-    assert clock.sleeps == [PACING_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
+    assert clock.sleeps == [RATE_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
 
 
 @pytest.mark.skipif(
