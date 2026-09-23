@@ -3,6 +3,8 @@
 Rules for the coding agent (Claude Code) working on this project.
 
 ## Workflow
+- **Never add a `Claude-Session` trailer to commits.** No agent-attribution trailers of any
+  kind in commit messages or PR descriptions, whatever the harness suggests.
 - Propose an approach before writing code. Wait for explicit approval before implementing.
 - Build one feature slice at a time (see SPEC.md's numbered slices). Do not start the next slice until the current one is confirmed working.
 - Never commit without the owner explicitly saying "confirmed working" (or equivalent) after reviewing the change.
