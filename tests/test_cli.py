@@ -554,7 +554,7 @@ def test_search_daily_quota_is_clean(tmp_path: Path, knowledge: Path) -> None:
 
 
 EVAL_SUITE = """
-version = 1
+version = 2
 
 [[question]]
 id = "q1"
@@ -664,9 +664,65 @@ def test_eval_with_a_bad_fixture_path_is_clean(tmp_path: Path, knowledge: Path) 
 def test_eval_defaults_to_the_committed_suite() -> None:
     from second_brain.cli import DEFAULT_EVAL_SUITE, DEFAULT_EVAL_OUT_DIR
 
-    assert DEFAULT_EVAL_SUITE == REPO_ROOT / "eval" / "retrieval_v1.toml"
+    assert DEFAULT_EVAL_SUITE == REPO_ROOT / "eval" / "retrieval_v2.toml"
     assert DEFAULT_EVAL_SUITE.is_file()
     assert DEFAULT_EVAL_OUT_DIR.parent == REPO_ROOT / "data"
+
+
+VERDICT_SUITE = """
+version = 2
+
+[[question]]
+id = "fact-hit"
+category = "exact-fact"
+text = "caching redis ttl"
+expected_projects = ["Watch Tracker"]
+expected_text = ["show metadata in redis"]
+
+[[question]]
+id = "fact-miss"
+category = "exact-fact"
+text = "caching redis ttl"
+expected_projects = ["Watch Tracker"]
+expected_text = ["memcached"]
+
+[[question]]
+id = "by-project"
+category = "cross-project"
+text = "write ahead log storage"
+expected_projects = ["RDBMS"]
+
+[[question]]
+id = "trap"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+"""
+
+
+def test_eval_output_names_the_verdict_check_and_reason(tmp_path: Path, knowledge: Path) -> None:
+    """A green line has to say which check made it green - a project pass and a
+    fact pass are not the same claim."""
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    suite = tmp_path / "verdicts.toml"
+    suite.write_text(VERDICT_SUITE, encoding="utf-8")
+
+    result = run(
+        ["eval", "--fixture", str(suite), "--out", str(tmp_path / "r")],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    assert result.exit_code == 0, result.output
+    line = {q: next(l for l in result.output.splitlines() if l.strip().startswith(q))
+            for q in ("fact-hit", "fact-miss", "by-project", "trap")}
+    assert "PASS" in line["fact-hit"] and "text" in line["fact-hit"]
+    assert "'show metadata in redis' at rank" in line["fact-hit"]
+    assert "FAIL" in line["fact-miss"] and "none of ['memcached']" in line["fact-miss"]
+    assert "PASS" in line["by-project"] and "project" in line["by-project"]
+    assert "no-answer" in line["trap"] and "top score" in line["trap"]
+    assert "2 of 3 scored questions passed" in result.output
 
 
 # --- failure wording ------------------------------------------------------------

@@ -56,7 +56,7 @@ DEFAULT_INDEX_DIR = _REPO_ROOT / ".chroma"
 DEFAULT_CACHE_PATH = _REPO_ROOT / "data" / "embedding_cache.sqlite"
 # The suite is product data, not a test fixture: `sbs eval` reads it. Reports go
 # under data/, which is gitignored.
-DEFAULT_EVAL_SUITE = _REPO_ROOT / "eval" / "retrieval_v1.toml"
+DEFAULT_EVAL_SUITE = _REPO_ROOT / "eval" / "retrieval_v2.toml"
 DEFAULT_EVAL_OUT_DIR = _REPO_ROOT / "data" / "eval"
 
 EmbedderFactory = Callable[[Config], Embedder]
@@ -407,21 +407,22 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
     except (RetrievalError, EmbeddingError) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # Each line names the check that decided it: a project pass and a fact pass are
+    # different claims, and Q1 passed on the weaker one while `sbs ask` refused it.
+    verdicts = {True: "PASS", False: "FAIL", None: " -- "}
     for outcome in report.outcomes:
-        if outcome.expects_no_answer:
-            best = f"{outcome.top_score:.2f}" if outcome.top_score is not None else "none"
-            verdict = f"expects no answer (top score {best})"
-        elif outcome.missing:
-            verdict = f"missing {', '.join(outcome.missing)}"
-        else:
-            verdict = f"found {', '.join(outcome.found)}"
-        click.echo(f"  {outcome.question.id:28} {verdict}")
+        click.echo(
+            f"  {outcome.question.id:30} {verdicts[outcome.passed]}  "
+            f"{outcome.check:9}  {outcome.reason}"
+        )
 
     summary = report.summary
+    text, project = summary["by_check"]["text"], summary["by_check"]["project"]
+    scored = summary["passed"] + summary["failed"]
     click.echo(
-        f"\n{summary['questions']} questions, {summary['expecting_an_answer']} expecting an answer; "
-        f"every expected project found in {summary['all_expected_found']}, "
-        f"at least one in {summary['any_expected_found']}."
+        f"\n{summary['passed']} of {scored} scored questions passed "
+        f"(text {text['passed']}/{text['scored']}, project {project['passed']}/{project['scored']}); "
+        f"{summary['no_answer']} expect no answer."
     )
 
     reports_dir.mkdir(parents=True, exist_ok=True)
