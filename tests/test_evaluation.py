@@ -124,11 +124,13 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     assert len(suite.questions) == len(by_id) == 11
     assert all(q.text and q.category for q in suite.questions)
     assert "q1-flashcards-model" not in by_id
-    # Q1a scores what the corpus states. It's stale - the owner runs 3.6 - but it
-    # is the fact retrieval can find, so it is the one retrieval is scored on.
-    assert by_id["q1a-flashcards-model-default"].expected_text == ("gemini-3.7-flash",)
-    # Nothing in the corpus answers these three.
-    assert by_id["q1b-flashcards-model-why"].check == "no-answer"
+    # DECISIONS.md records the move from 3.7 to 3.6 and why. 3.7 is also in that
+    # passage - saying it is NOT the default - so it can't be Q1a's string.
+    assert by_id["q1a-flashcards-model-default"].expected_text == ("gemini-3.6-flash",)
+    q1b = by_id["q1b-flashcards-model-why"]
+    assert q1b.check == "text"
+    assert q1b.expected_text == ("experiencing high demand",)
+    # Nothing in the corpus answers these two.
     assert by_id["q10-kubernetes"].check == "no-answer"
     assert by_id["q5-dsa-review-security"].check == "no-answer"
     # Q5's fix lives only in git history, which the index does not cover.

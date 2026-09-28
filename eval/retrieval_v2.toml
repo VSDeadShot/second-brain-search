@@ -1,4 +1,5 @@
-# Retrieval eval suite, version 2 - the owner's questions from 2026-09-21, revised 2026-09-25.
+# Retrieval eval suite, version 2 - the owner's questions from 2026-09-21, revised 2026-09-25
+# and 2026-09-28.
 #
 # `expected_projects` are the owner's own guesses, mapped to the project names the
 # index actually uses (watch-next -> Watch Tracker, omnitask -> ToDoApp,
@@ -19,6 +20,10 @@
 # model. Q2, Q4 and Q9 gained the string that states their fact. Q5 became a
 # no-answer question: its answer exists only in git history.
 #
+# 2026-09-28: Interview Flashcards' docs/DECISIONS.md records the default model moving from
+# 3.7-flash to 3.6-flash, and why. Q1a now expects 3.6, and Q1b, which nothing answered
+# before, became a text question.
+#
 # Rules for expected_text strings:
 # - VERBATIM ONLY. Every string must be a phrasing that exists in the corpus as
 #   written, never a paraphrase. Only whitespace may differ, since the matcher
@@ -38,24 +43,25 @@ id = "q1a-flashcards-model-default"
 category = "exact-fact"
 text = "Which Gemini model does Interview Flashcards use by default?"
 expected_projects = ["Interview Flashcards"]
-expected_text = ["gemini-3.7-flash"]
+expected_text = ["gemini-3.6-flash"]
 notes = """
-What the corpus says, not what is true: the owner runs 3.6-flash, since 3.7 kept failing
-under load after the doc was written. The string is in exactly 3 indexed chunks, all in
-docs/superpowers/plans/2026-08-18-ai-card-generation.md (#5, #21, #23) - one code line in
-each 33-44-line chunk. For v1's wording ("...and why?") the best of them ranked 20th of 812
-uncapped on 2026-09-25, and it could not appear at any k on the capped path.
+docs/DECISIONS.md #1 - the string is in that chunk only. The implementation plan
+(plans/2026-08-18-ai-card-generation.md #5, #21, #23) still says 3.7-flash; DECISIONS.md
+supersedes it. Not "gemini-3.7-flash": DECISIONS #1 contains it too, saying 3.7 is NOT the
+default, so it would pass on the passage that contradicts it (it did, on 2026-09-28).
 """
 
 [[question]]
 id = "q1b-flashcards-model-why"
-category = "trap"
+category = "how-did-i"
 text = "Why did I choose the default Gemini model for Interview Flashcards?"
-expected_projects = []
+expected_projects = ["Interview Flashcards"]
+expected_text = ["experiencing high demand"]
 notes = """
-No doc says why the model was chosen - only why it is configurable
-(specs/2026-08-18-ai-card-generation-design.md:134). A trap because the passages about
-configurability read like an answer.
+docs/DECISIONS.md #1 (the string is in that chunk only): 3.7-flash answered 500 "experiencing
+high demand" on every attempt in a live run, and 3.6-flash was watched working end to end.
+Was a no-answer trap until that doc existed; `sbs ask` answered it from DECISIONS.md on
+2026-09-28.
 """
 
 [[question]]
