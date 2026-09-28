@@ -22,7 +22,7 @@
 #
 # 2026-09-28: Interview Flashcards' docs/DECISIONS.md records the default model moving from
 # 3.7-flash to 3.6-flash, and why. Q1a now expects 3.6, and Q1b, which nothing answered
-# before, became a text question.
+# before, became a text question. Q11 was added to keep three no-answer questions.
 #
 # Rules for expected_text strings:
 # - VERBATIM ONLY. Every string must be a phrasing that exists in the corpus as
@@ -157,4 +157,21 @@ notes = """
 Nothing in the corpus answers this - no file matches kubernetes, k8s, kubectl, helm or pod.
 Scored as expecting no answer; the report keeps the scores so weak matches stay visible
 (they were 0.64/0.64/0.63 on 2026-09-21, against 0.68-0.77 for real hits).
+"""
+
+[[question]]
+id = "q11-flashcards-error-monitoring"
+category = "trap"
+text = "Which error-monitoring or crash-reporting service did I set up for Interview Flashcards?"
+expected_projects = []
+notes = """
+No doc names one. On 2026-09-28, none of sentry, crashlytics, datadog, new relic, monitoring,
+alerting, uptime, observability, error tracking, crash report or log aggregation appeared in
+any indexed doc. The corpus does discuss errors and logs (the 500/503 mapping, a rejected
+Gemini key surfacing as a bodyless 500 in docs/DECISIONS.md #4, startup logs in DECISIONS #2),
+but none of those reached the top 10 on 2026-09-28: the project name pulled in Interview
+Flashcards overview passages (README, Commands) at 0.66-0.67, and `sbs ask` refused.
+Stays a trap only while no monitoring/crash-reporting service exists for Interview Flashcards.
+If one is ever added (e.g. Sentry), convert this to a text check or replace it, like Q1b on
+2026-09-28.
 """

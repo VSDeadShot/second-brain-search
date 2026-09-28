@@ -121,7 +121,7 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     by_id = {q.id: q for q in suite.questions}
 
     assert suite.version == 2
-    assert len(suite.questions) == len(by_id) == 11
+    assert len(suite.questions) == len(by_id) == 12
     assert all(q.text and q.category for q in suite.questions)
     assert "q1-flashcards-model" not in by_id
     # DECISIONS.md records the move from 3.7 to 3.6 and why. 3.7 is also in that
@@ -130,8 +130,9 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     q1b = by_id["q1b-flashcards-model-why"]
     assert q1b.check == "text"
     assert q1b.expected_text == ("experiencing high demand",)
-    # Nothing in the corpus answers these two.
+    # Nothing in the corpus answers these three.
     assert by_id["q10-kubernetes"].check == "no-answer"
+    assert by_id["q11-flashcards-error-monitoring"].check == "no-answer"
     assert by_id["q5-dsa-review-security"].check == "no-answer"
     # Q5's fix lives only in git history, which the index does not cover.
     assert "git" in by_id["q5-dsa-review-security"].notes.lower()
