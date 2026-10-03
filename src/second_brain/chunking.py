@@ -46,6 +46,15 @@ class Chunk:
     content_hash: str
     """sha256 of `embed_text` - the embedding-cache key, so it tracks what was embedded."""
     mtime: float
+    # Git-history chunks fill these in (see git_history.py); a doc chunk keeps the
+    # defaults. Empty strings rather than None because Chroma metadata rejects None.
+    source: str = "doc"
+    commit: str = ""
+    """Full commit hash."""
+    author: str = ""
+    author_email: str = ""
+    author_date: str = ""
+    """ISO 8601, with the author's own UTC offset."""
 
 
 def _embed_text(heading_path: str, piece: str) -> str:
