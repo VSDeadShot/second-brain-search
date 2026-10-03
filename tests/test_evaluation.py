@@ -121,7 +121,7 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     by_id = {q.id: q for q in suite.questions}
 
     assert suite.version == 2
-    assert len(suite.questions) == len(by_id) == 12
+    assert len(suite.questions) == len(by_id) == 13
     assert all(q.text and q.category for q in suite.questions)
     assert "q1-flashcards-model" not in by_id
     # DECISIONS.md records the move from 3.7 to 3.6 and why. 3.7 is also in that
@@ -148,6 +148,10 @@ def test_fact_questions_carry_the_string_that_states_the_fact() -> None:
     )
     assert by_id["q4-omnitask-lost-writes"].expected_text == ("swaps the file in atomically",)
     assert by_id["q9-signin-hammering"].expected_text == ("LoginRateLimit",)
+    # Answered only by a commit message, never by a doc: the target for git history.
+    q12 = by_id["q12-dsa-idor-fix"]
+    assert q12.expected_projects == ("DSA Tracker",)
+    assert q12.expected_text == ("verifying problem ownership",)
     # Q3 has no string rare enough to trust, and the cross-project questions are
     # answered by the projects themselves: all stay on the project check.
     for qid in ("q3-watch-next-auth", "q6-rate-limiting", "q7-gemini-projects", "q8-spaced-repetition"):

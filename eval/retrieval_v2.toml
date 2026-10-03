@@ -24,6 +24,9 @@
 # 3.7-flash to 3.6-flash, and why. Q1a now expects 3.6, and Q1b, which nothing answered
 # before, became a text question. Q11 was added to keep three no-answer questions.
 #
+# 2026-10-03: Q12 added, answered only by a commit message. It fails until git history is
+# indexed, and is the target for that slice.
+#
 # Rules for expected_text strings:
 # - VERBATIM ONLY. Every string must be a phrasing that exists in the corpus as
 #   written, never a paraphrase. Only whitespace may differ, since the matcher
@@ -174,4 +177,19 @@ Flashcards overview passages (README, Commands) at 0.66-0.67, and `sbs ask` refu
 Stays a trap only while no monitoring/crash-reporting service exists for Interview Flashcards.
 If one is ever added (e.g. Sentry), convert this to a text check or replace it, like Q1b on
 2026-09-28.
+"""
+
+[[question]]
+id = "q12-dsa-idor-fix"
+category = "how-did-i"
+text = "How did I fix the IDOR vulnerability in DSA Tracker's submitReview endpoint?"
+expected_projects = ["DSA Tracker"]
+expected_text = ["verifying problem ownership"]
+notes = """
+Answered only by DSA Tracker commit b237453 (2026-07-02), "security: Fix submitReview
+authorization vulnerability by verifying problem ownership". The subject says what was fixed
+and the 9-line diff says how: the problem is looked up and its user_id compared with the
+signed-in user's before the review is recorded. The string is in that commit message only -
+0 indexed doc chunks, 1 commit across all 16 repos, counted 2026-10-03. "IDOR" appears
+nowhere, so this is also a vocabulary gap, like Q9. Q5 asks for the same fix in plain words.
 """
