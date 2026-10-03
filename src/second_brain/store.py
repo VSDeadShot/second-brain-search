@@ -79,6 +79,12 @@ class ChunkStore:
                     "chunk_index": c.chunk_index,
                     "content_hash": c.content_hash,
                     "mtime": c.mtime,
+                    # "doc" or "git"; the rest are empty for a doc chunk.
+                    "source": c.source,
+                    "commit": c.commit,
+                    "author": c.author,
+                    "author_email": c.author_email,
+                    "author_date": c.author_date,
                 }
                 for c in chunks
             ],

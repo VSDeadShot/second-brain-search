@@ -43,3 +43,21 @@ exclude_paths = [
     "SIH/driftless-int",
     "Second Brain/CLAUDE_SUMMARY.md",
 ]
+
+[git]
+# Index each repo's commit history alongside its docs. A repo with a remote is
+# read at the remote's default branch as last fetched (origin/HEAD); a repo with
+# no remote is read at its local HEAD. Indexing never fetches.
+enabled = true
+
+# Only commits by these authors are indexed - a commit matching EITHER list is
+# kept. Leave both empty HERE: the real values go in the gitignored
+# config.local.toml, which overrides these keys. With enabled = true and both
+# lists empty, `sbs index` refuses to run.
+author_emails = []
+author_names = []
+
+# A commit with no body, or a message under thin_message_chars, also gets this
+# much of its diff (secret-looking lines, lockfiles, images and env files removed).
+diff_excerpt_chars = 800
+thin_message_chars = 200

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from dotenv import dotenv_values
 
@@ -62,6 +63,15 @@ FALLBACK_GENERATION_MODEL = "gemini-3.6-flash"
 
 _LIST_FIELDS = ("include_patterns", "include_dirs", "exclude_dirs", "exclude_paths")
 
+# [git] key -> (Config field, expected kind).
+_GIT_FIELDS: dict[str, tuple[str, str]] = {
+    "enabled": ("git_enabled", "bool"),
+    "author_emails": ("git_author_emails", "strings"),
+    "author_names": ("git_author_names", "strings"),
+    "diff_excerpt_chars": ("git_diff_excerpt_chars", "positive int"),
+    "thin_message_chars": ("git_thin_message_chars", "positive int"),
+}
+
 
 @dataclass(frozen=True)
 class Config:
@@ -72,6 +82,14 @@ class Config:
     exclude_dirs: tuple[str, ...]
     exclude_paths: tuple[str, ...]
     generation_model: str = DEFAULT_GENERATION_MODEL
+    # Off unless config.toml turns it on, so a bare Config indexes docs only.
+    git_enabled: bool = False
+    # Only commits by these authors are indexed - a match on EITHER list. The
+    # real values live in the gitignored config.local.toml.
+    git_author_emails: tuple[str, ...] = ()
+    git_author_names: tuple[str, ...] = ()
+    git_diff_excerpt_chars: int = 800
+    git_thin_message_chars: int = 200
 
 
 def _repo_root() -> Path:
@@ -79,7 +97,45 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _read_discovery_table(path: Path) -> dict[str, tuple[str, ...]]:
+def _table(raw: dict[str, Any], name: str, valid: Iterable[str], filename: str) -> dict[str, Any]:
+    table = raw.get(name, {})
+    if not isinstance(table, dict):
+        raise ConfigError(f"{filename}: [{name}] must be a table")
+    valid = tuple(valid)
+    unknown = sorted(set(table) - set(valid))
+    if unknown:
+        raise ConfigError(
+            f"{filename}: unknown key(s) under [{name}]: {', '.join(unknown)}. "
+            f"Valid keys are: {', '.join(valid)}"
+        )
+    return table
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
+_EXPECTED = {
+    "bool": "true or false",
+    "strings": "a list of strings",
+    "positive int": "a positive integer",
+}
+
+
+def _git_value(key: str, value: object, kind: str, filename: str) -> object:
+    if kind == "bool" and isinstance(value, bool):
+        return value
+    if kind == "strings" and _is_string_list(value):
+        return tuple(value)  # type: ignore[arg-type]
+    # bool is an int subclass, so `true` has to be refused explicitly here.
+    is_int = isinstance(value, int) and not isinstance(value, bool)
+    if kind == "positive int" and is_int and value > 0:  # type: ignore[operator]
+        return value
+    raise ConfigError(f"{filename}: [git].{key} must be {_EXPECTED[kind]}")
+
+
+def _read_overrides(path: Path) -> dict[str, Any]:
+    """Config fields set by one TOML file - only the keys it actually contains."""
     if not path.is_file():
         return {}
 
@@ -88,22 +144,15 @@ def _read_discovery_table(path: Path) -> dict[str, tuple[str, ...]]:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
 
-    table = raw.get("discovery", {})
-    if not isinstance(table, dict):
-        raise ConfigError(f"{path.name}: [discovery] must be a table")
-
-    unknown = sorted(set(table) - set(_LIST_FIELDS))
-    if unknown:
-        raise ConfigError(
-            f"{path.name}: unknown key(s) under [discovery]: {', '.join(unknown)}. "
-            f"Valid keys are: {', '.join(_LIST_FIELDS)}"
-        )
-
-    values: dict[str, tuple[str, ...]] = {}
-    for key, value in table.items():
-        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+    values: dict[str, Any] = {}
+    for key, value in _table(raw, "discovery", _LIST_FIELDS, path.name).items():
+        if not _is_string_list(value):
             raise ConfigError(f"{path.name}: [discovery].{key} must be a list of strings")
         values[key] = tuple(value)
+
+    for key, value in _table(raw, "git", _GIT_FIELDS, path.name).items():
+        field_name, kind = _GIT_FIELDS[key]
+        values[field_name] = _git_value(key, value, kind, path.name)
     return values
 
 
@@ -148,8 +197,10 @@ def load_config(
         generation_model=(env.get("SBS_GENERATION_MODEL") or "").strip() or DEFAULT_GENERATION_MODEL,
     )
 
+    # Key by key: a local file that sets only the author lists leaves config.toml's
+    # other [git] values (and its [discovery] table) in place.
     for name in ("config.toml", "config.local.toml"):
-        overrides = _read_discovery_table(root / name)
+        overrides = _read_overrides(root / name)
         if overrides:
             config = replace(config, **overrides)
 

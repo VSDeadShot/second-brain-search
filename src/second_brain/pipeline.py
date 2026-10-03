@@ -7,7 +7,9 @@ and the next run embeds only text it has not seen. That matters because the
 Gemini free tier allows 1000 embedded texts a day and a rebuild needs ~812.
 
 Chunking is split out as `collect_chunks` so a dry run can report exactly what
-indexing would embed without calling the API.
+indexing would embed without calling the API. With [git] enabled it also reads
+each discovered repo's commit history (git_history.py) - only the configured
+authors' commits, and it refuses to run with no author configured.
 """
 
 from __future__ import annotations
@@ -15,19 +17,39 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from .chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP, Chunk, chunk_document
-from .config import Config
+from .config import Config, ConfigError
 from .discovery import DiscoveredDoc, discover_documents
 from .embedding import BatchCallback, Embedder, EmbeddingError
 from .embedding_cache import EmbeddingCache, cache_key
+from .git_history import GitError, RepoHistory, RepoStatus, collect_repo_history, repo_status
 from .store import ChunkStore, VectorSpaceMismatch
+
+
+@dataclass(frozen=True)
+class GitRepoReport:
+    """One repo's history: what was read, from where, and what was kept."""
+
+    project: str
+    ref: str
+    branch: str | None
+    flags: tuple[str, ...]
+    commits: int
+    kept: int
+    merges: int
+    version_bumps: int
+    other_authors: int
+    with_excerpt: int
+    chunks: int
 
 
 @dataclass(frozen=True)
 class IndexReport:
     documents: int
     chunks: int
+    """Every chunk, docs and commits."""
     projects: int
     skipped: list[tuple[str, str]] = field(default_factory=list)
     chunks_per_project: dict[str, int] = field(default_factory=dict)
@@ -35,6 +57,8 @@ class IndexReport:
     embedded: int = 0
     # Chunks whose vector came from a saved embedding instead.
     reused: int = 0
+    git_repos: list[GitRepoReport] = field(default_factory=list)
+    git_chunks: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,6 +98,44 @@ def embedding_plan(
     )
 
 
+def require_git_authors(config: Config) -> None:
+    """Refuse a git-enabled run that names no author.
+
+    An empty author list keeps nothing, so the run would look fine while quietly
+    indexing no history - or, if matching ever loosened, index everyone's.
+    """
+    if config.git_enabled and not (config.git_author_emails or config.git_author_names):
+        raise ConfigError(
+            "Git history is enabled ([git] enabled = true) but no author is set: "
+            "[git] author_emails and author_names are both empty. Add your commit "
+            "email(s) or name(s) to config.local.toml (gitignored) - only those "
+            "authors' commits are indexed - or set [git] enabled = false."
+        )
+
+
+def _git_repos(documents: Sequence[DiscoveredDoc]) -> list[tuple[str, Path]]:
+    """(project, repo root) for each discovered project that is a git repo."""
+    roots = {doc.project_root: doc.project for doc in documents}
+    repos = [(project, root) for root, project in roots.items() if (root / ".git").exists()]
+    return sorted(repos, key=lambda pair: pair[0].lower())
+
+
+def _repo_report(project: str, status: RepoStatus, history: RepoHistory) -> GitRepoReport:
+    return GitRepoReport(
+        project=project,
+        ref=status.ref,
+        branch=status.branch,
+        flags=tuple(status.flags),
+        commits=history.commits,
+        kept=history.kept,
+        merges=history.merges,
+        version_bumps=history.version_bumps,
+        other_authors=history.other_authors,
+        with_excerpt=history.with_excerpt,
+        chunks=len(history.chunks),
+    )
+
+
 def collect_chunks(
     config: Config,
     *,
@@ -86,6 +148,7 @@ def collect_chunks(
     `docs` can be supplied to reuse an existing discovery pass; otherwise the
     scan runs here.
     """
+    require_git_authors(config)
     documents = list(docs) if docs is not None else discover_documents(config)
 
     chunks: list[Chunk] = []
@@ -106,12 +169,40 @@ def collect_chunks(
         projects.add(doc.project)
         chunks.extend(chunk_document(doc, text, max_chars=max_chars, overlap=overlap))
 
+    git_repos: list[GitRepoReport] = []
+    git_chunk_count = 0
+    if config.git_enabled:
+        for project, repo in _git_repos(documents):
+            try:
+                status = repo_status(repo)
+                history = collect_repo_history(
+                    repo,
+                    project=project,
+                    ref=status.ref,
+                    author_emails=config.git_author_emails,
+                    author_names=config.git_author_names,
+                    thin_message_chars=config.git_thin_message_chars,
+                    diff_excerpt_chars=config.git_diff_excerpt_chars,
+                    max_chars=max_chars,
+                    overlap=overlap,
+                )
+            except GitError as exc:
+                # A repo git can't read loses its history, not its docs.
+                skipped.append((str(repo), f"git history: {exc}"))
+                continue
+            projects.add(project)
+            chunks.extend(history.chunks)
+            git_chunk_count += len(history.chunks)
+            git_repos.append(_repo_report(project, status, history))
+
     report = IndexReport(
         documents=read_count,
         chunks=len(chunks),
         projects=len(projects),
         skipped=skipped,
         chunks_per_project=dict(Counter(c.project for c in chunks)),
+        git_repos=git_repos,
+        git_chunks=git_chunk_count,
     )
     return ChunkCollection(chunks=chunks, report=report)
 

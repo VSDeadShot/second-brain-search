@@ -1,9 +1,10 @@
 """Read a repo's commit history and turn the owner's commits into chunks.
 
 Docs record what a project is; commits often hold the only record of how
-something was fixed. This module reads HEAD's history through the git CLI (a list
-of arguments, no shell, a timeout) and produces `Chunk`s shaped like a doc's, so
-the rest of the pipeline can treat both sources alike.
+something was fixed. This module reads a repo's history through the git CLI (a
+list of arguments, no shell, a timeout) and produces `Chunk`s shaped like a doc's,
+so the rest of the pipeline can treat both sources alike. `repo_status` picks the
+ref: the remote's default branch as last fetched, or local HEAD with no remote.
 
 A commit becomes one text: subject, body, the files it changed, and for a thin
 commit (no body, or a short message) a small diff excerpt, because a thin
@@ -12,7 +13,7 @@ images, binaries, env files or keys, and it drops any line that looks like a
 secret. The commit text never names its repo; `embed_text` does, since questions
 usually name the project.
 
-Nothing here touches the index - wiring this into indexing is a separate step.
+Nothing here touches the index; pipeline.collect_chunks calls in when [git] is on.
 """
 
 from __future__ import annotations
@@ -161,12 +162,17 @@ class RepoHistory:
 
 @dataclass(frozen=True)
 class RepoStatus:
+    ref: str
+    """What history is read from: the remote default branch (e.g. "origin/main"),
+    or "HEAD" for a repo with no remote or no resolvable default branch."""
     branch: str | None
     """Checked-out branch, or None for a detached HEAD."""
     default_branch: str | None
     has_remote: bool
-    unpushed: int
-    """Commits on HEAD that no remote-tracking branch has (as of the last fetch)."""
+    ahead: int = 0
+    """Commits on local HEAD that `ref` lacks - they will not be indexed."""
+    behind: int = 0
+    """Commits on `ref` that local HEAD lacks."""
     flags: list[str] = field(default_factory=list)
 
 
@@ -212,9 +218,13 @@ def _git_optional(repo: Path, *args: str, timeout: float = DEFAULT_TIMEOUT) -> s
 # --- reading -----------------------------------------------------------------------
 
 
-def read_commits(repo: Path, *, timeout: float = DEFAULT_TIMEOUT) -> list[Commit]:
-    """Every commit reachable from HEAD, newest first."""
-    out = _git(repo, "log", "HEAD", f"--format={_LOG_FORMAT}", "--name-only", timeout=timeout)
+def read_commits(
+    repo: Path, *, ref: str = "HEAD", timeout: float = DEFAULT_TIMEOUT
+) -> list[Commit]:
+    """Every commit reachable from `ref`, newest first."""
+    if not ref or ref.startswith("-"):
+        raise ValueError(f"not a ref: {ref!r}")
+    out = _git(repo, "log", ref, f"--format={_LOG_FORMAT}", "--name-only", timeout=timeout)
 
     commits: list[Commit] = []
     for record in out.split(_RECORD)[1:]:
@@ -421,6 +431,7 @@ def collect_repo_history(
     project: str,
     author_emails: Iterable[str],
     author_names: Iterable[str],
+    ref: str = "HEAD",
     thin_message_chars: int = DEFAULT_THIN_MESSAGE_CHARS,
     diff_excerpt_chars: int = DEFAULT_DIFF_EXCERPT_CHARS,
     max_chars: int = DEFAULT_MAX_CHARS,
@@ -428,8 +439,8 @@ def collect_repo_history(
     min_chars: int = DEFAULT_MIN_CHARS,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> RepoHistory:
-    """Read, filter and chunk one repo's history. Raises GitError if git fails."""
-    commits = read_commits(repo, timeout=timeout)
+    """Read, filter and chunk one repo's history at `ref`. Raises GitError if git fails."""
+    commits = read_commits(repo, ref=ref, timeout=timeout)
     selection = filter_commits(commits, author_emails=author_emails, author_names=author_names)
 
     chunks: list[Chunk] = []
@@ -469,49 +480,71 @@ def collect_repo_history(
 # --- repo status (for the dry run) -------------------------------------------------
 
 
-def repo_status(repo: Path, *, timeout: float = DEFAULT_TIMEOUT) -> RepoStatus:
-    """Which branch is checked out, and whether HEAD has commits no remote has.
-
-    Uses remote-tracking refs as of the last fetch - it never touches the network.
-    """
-    remotes = _git(repo, "remote", timeout=timeout).split()
-    branch = _git_optional(repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=timeout) or None
-
-    if not remotes:
-        return RepoStatus(
-            branch=branch, default_branch=None, has_remote=False, unpushed=0, flags=["no remote"]
-        )
-
-    remote = "origin" if "origin" in remotes else remotes[0]
-    default_branch: str | None = None
+def _remote_default_branch(repo: Path, remote: str, timeout: float) -> str | None:
+    """The remote's default branch as last fetched: <remote>/HEAD, else main, else master."""
     head_ref = _git_optional(
         repo, "symbolic-ref", "--short", "-q", f"refs/remotes/{remote}/HEAD", timeout=timeout
     )
     if head_ref:
-        default_branch = head_ref.removeprefix(f"{remote}/")
-    else:
-        for candidate in ("main", "master"):
-            ref = f"refs/remotes/{remote}/{candidate}"
-            if _git_optional(repo, "rev-parse", "--verify", "-q", ref, timeout=timeout):
-                default_branch = candidate
-                break
+        return head_ref.removeprefix(f"{remote}/")
+    for candidate in ("main", "master"):
+        ref = f"refs/remotes/{remote}/{candidate}"
+        if _git_optional(repo, "rev-parse", "--verify", "-q", ref, timeout=timeout):
+            return candidate
+    return None
 
-    unpushed = int(_git(repo, "rev-list", "--count", "HEAD", "--not", "--remotes", timeout=timeout))
+
+def repo_status(repo: Path, *, timeout: float = DEFAULT_TIMEOUT) -> RepoStatus:
+    """Which ref to read history from, and how the local checkout compares to it.
+
+    A repo with a remote is read at the remote's default branch, so the index
+    holds what was pushed, whatever happens to be checked out. Remote-tracking
+    refs are used as of the last fetch - this never touches the network.
+    """
+    remotes = _git(repo, "remote", timeout=timeout).split()
+    branch = _git_optional(repo, "symbolic-ref", "--short", "-q", "HEAD", timeout=timeout) or None
 
     flags: list[str] = []
     if branch is None:
         flags.append("detached HEAD")
-    elif default_branch is None:
-        flags.append(f"on {branch}, default branch unknown")
-    elif branch != default_branch:
-        flags.append(f"on {branch}, not {default_branch}")
-    if unpushed:
-        flags.append(f"{unpushed} unpushed commit{'s' if unpushed != 1 else ''}")
+
+    if not remotes:
+        return RepoStatus(
+            ref="HEAD",
+            branch=branch,
+            default_branch=None,
+            has_remote=False,
+            flags=flags + ["no remote - reading local HEAD"],
+        )
+
+    remote = "origin" if "origin" in remotes else remotes[0]
+    default_branch = _remote_default_branch(repo, remote, timeout)
+    if default_branch is None:
+        return RepoStatus(
+            ref="HEAD",
+            branch=branch,
+            default_branch=None,
+            has_remote=True,
+            flags=flags + ["default branch unknown - reading local HEAD"],
+        )
+
+    ref = f"{remote}/{default_branch}"
+    counts = _git(repo, "rev-list", "--left-right", "--count", f"HEAD...{ref}", timeout=timeout)
+    ahead, behind = (int(n) for n in counts.split())
+
+    if branch is not None and branch != default_branch:
+        flags.append(f"checked out {branch}, not {default_branch}")
+    if ahead:
+        flags.append(f"local is {ahead} ahead of {ref}")
+    if behind:
+        flags.append(f"local is {behind} behind {ref}")
 
     return RepoStatus(
+        ref=ref,
         branch=branch,
         default_branch=default_branch,
         has_remote=True,
-        unpushed=unpushed,
+        ahead=ahead,
+        behind=behind,
         flags=flags,
     )

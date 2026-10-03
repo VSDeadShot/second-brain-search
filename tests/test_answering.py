@@ -20,6 +20,7 @@ from second_brain.pipeline import collect_chunks, store_chunks
 from second_brain.retrieval import RetrievalError
 from second_brain.store import ChunkStore
 
+from conftest import make_git_chunk
 from fakes import FakeGenerator, FakeRunner, KeywordEmbedder
 
 
@@ -258,3 +259,26 @@ def test_a_citation_is_a_citation_and_an_answer_is_an_answer(indexed, dates) -> 
 
     assert isinstance(answer, Answer)
     assert all(isinstance(c, Citation) for c in answer.citations)
+
+
+# --- citing a commit --------------------------------------------------------------
+
+
+def test_a_commit_citation_is_dated_by_its_author_date(tmp_path: Path, knowledge: Path) -> None:
+    store = ChunkStore(tmp_path / "chroma")
+    embedder = KeywordEmbedder()
+    store_chunks(collect_chunks(config_for(knowledge)), embedder, store, rebuild=True)
+    chunk = make_git_chunk()
+    store.upsert([chunk], embedder.embed_documents([chunk.embed_text]))
+    # A commit has no file to date: git must not be asked about its path.
+    never_run = DateLookup(runner=FakeRunner(raises=AssertionError("git was asked")))
+    generator = FakeGenerator(RawAnswer(True, "It verifies ownership [1].", (1,)))
+
+    answer = answer_question(
+        "submitReview problem ownership", embedder, store, generator, dates=never_run
+    )
+
+    (citation,) = answer.citations
+    assert citation.chunk.source == "git"
+    assert (citation.date, citation.date_source) == ("2026-07-02", "committed")
+    assert citation.changed_since_indexed is False

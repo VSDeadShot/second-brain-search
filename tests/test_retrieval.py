@@ -23,7 +23,7 @@ from second_brain.retrieval import (
 )
 from second_brain.store import ChunkStore
 
-from conftest import make_file, make_git_dir
+from conftest import ME, make_file, make_git_chunk, make_git_dir
 from fakes import FakeEmbedder, KeywordEmbedder
 
 
@@ -383,3 +383,65 @@ def test_quota_errors_while_embedding_the_query_propagate(indexed) -> None:
 
     with pytest.raises(DailyQuotaExceeded):
         retrieve("caching", QuotaSpentEmbedder(), store)
+
+
+# --- commits as results -------------------------------------------------------------
+
+
+def _with_a_commit(tmp_path: Path, knowledge: Path) -> tuple[ChunkStore, KeywordEmbedder]:
+    store = ChunkStore(tmp_path / "chroma")
+    embedder = KeywordEmbedder()
+    collected = collect_chunks(config_for(knowledge))
+    store_chunks(collected, embedder, store, rebuild=True)
+    chunk = make_git_chunk()
+    store.upsert([chunk], embedder.embed_documents([chunk.embed_text]))
+    return store, embedder
+
+
+def test_a_commit_result_carries_its_commit_metadata(tmp_path: Path, knowledge: Path) -> None:
+    store, embedder = _with_a_commit(tmp_path, knowledge)
+
+    top = retrieve("submitReview problem ownership", embedder, store, k=1)[0]
+
+    assert top.source == "git"
+    assert top.rel_path == "commit b237453"
+    assert top.commit == "b237453" + "0" * 33
+    assert top.author == ME[0]
+    assert top.author_email == ME[1]
+    assert top.author_date == "2026-07-02T10:00:00+05:30"
+
+
+def test_a_doc_result_is_marked_as_a_doc(indexed) -> None:
+    store, embedder = indexed
+
+    top = retrieve("redis caching ttl", embedder, store, k=1)[0]
+
+    assert top.source == "doc"
+    assert top.commit == ""
+
+
+def test_rows_from_an_index_built_before_commits_read_as_docs(tmp_path: Path) -> None:
+    """The previous index has no source/commit keys and stays in use until a rebuild."""
+    store = ChunkStore(tmp_path / "chroma")
+    embedder = KeywordEmbedder()
+    store.record_namespace(embedder.cache_namespace)
+    store._collection.upsert(
+        ids=["old"],
+        embeddings=[embedder.embed_documents(["redis caching ttl"])[0]],
+        documents=["redis caching ttl"],
+        metadatas=[
+            {
+                "project": "Watch Tracker",
+                "rel_path": "EXPLAINER.md",
+                "path": "/p/EXPLAINER.md",
+                "heading_path": "Caching",
+                "chunk_index": 0,
+                "content_hash": "h",
+                "mtime": 0.0,
+            }
+        ],
+    )
+
+    top = retrieve("redis caching ttl", embedder, store, k=1)[0]
+
+    assert (top.source, top.commit, top.author, top.author_date) == ("doc", "", "", "")

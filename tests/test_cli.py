@@ -43,7 +43,7 @@ from second_brain.embedding_cache import EmbeddingCache, cache_key
 from second_brain.pipeline import IndexReport, collect_chunks
 from second_brain.store import ChunkStore
 
-from conftest import make_file, make_git_dir
+from conftest import ME, make_file, make_git_chunk, make_git_dir
 from second_brain.embedding import DailyQuotaExceeded
 
 from fakes import (
@@ -73,8 +73,18 @@ def run(
     factory=None,
     generator=None,
     api_key="fake-key",
+    config_root: Path | None = None,
 ):
-    obj: dict = {"index_dir": index_dir, "cache_path": cache_path_for(index_dir)}
+    # config.toml / config.local.toml / .env are read from here - by default an
+    # empty folder, so no test sees the repo's real config or the owner's authors.
+    if config_root is None:
+        config_root = index_dir.parent / "config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+    obj: dict = {
+        "index_dir": index_dir,
+        "cache_path": cache_path_for(index_dir),
+        "config_root": config_root,
+    }
     if factory is not None:
         obj["embedder_factory"] = factory
     if generator is not None:
@@ -1041,3 +1051,147 @@ def test_the_real_generator_is_built_from_the_configured_model(tmp_path: Path) -
     )
 
     assert _gemini_generator(config).model == "gemini-3.6-flash"
+
+
+# --- config comes from the injected root -------------------------------------------
+
+
+def test_the_cli_reads_config_from_the_injected_root(tmp_path: Path, tree: Path) -> None:
+    config_root = tmp_path / "cfg"
+    make_file(
+        config_root / "config.toml",
+        '[discovery]\ninclude_patterns = ["CLAUDE.md"]\ninclude_dirs = []\n',
+    )
+
+    result = run(
+        ["discover", "--json"],
+        scan_root=tree,
+        index_dir=tmp_path / "chroma",
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert {Path(d["path"]).name for d in json.loads(result.output)} == {"CLAUDE.md"}
+
+
+# --- git history in `sbs index` ----------------------------------------------------
+
+
+def git_config_root(tmp_path: Path, *, authors: bool = True) -> Path:
+    """config.toml as committed (enabled, empty lists) plus a local file with authors."""
+    root = tmp_path / "cfg"
+    make_file(
+        root / "config.toml",
+        "[git]\nenabled = true\nauthor_emails = []\nauthor_names = []\n",
+    )
+    if authors:
+        make_file(root / "config.local.toml", f'[git]\nauthor_emails = ["{ME[1]}"]\n')
+    return root
+
+
+@pytest.mark.parametrize("args", [["index"], ["index", "--dry-run"]])
+def test_index_refuses_git_with_no_authors_and_embeds_nothing(
+    tmp_path: Path, corpus: Path, args: list[str]
+) -> None:
+    index_dir = tmp_path / "chroma"
+    run(["index"], scan_root=corpus, index_dir=index_dir, factory=fake_factory)
+    before = ChunkStore(index_dir).count()
+
+    result = run(
+        args,
+        scan_root=corpus,
+        index_dir=index_dir,
+        factory=must_not_embed,
+        config_root=git_config_root(tmp_path, authors=False),
+    )
+
+    assert result.exit_code != 0
+    assert "config.local.toml" in result.output
+    assert "Traceback" not in result.output
+    assert ChunkStore(index_dir).count() == before
+
+
+def test_dry_run_reports_each_repos_history(tmp_path: Path, git_corpus: Path) -> None:
+    result = run(
+        ["index", "--dry-run"],
+        scan_root=git_corpus,
+        index_dir=tmp_path / "chroma",
+        factory=must_not_embed,
+        api_key="",
+        config_root=git_config_root(tmp_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Would index 3 documents and 4 commits across 3 projects" in out
+    alpha = next(line for line in out.splitlines() if line.strip().startswith("Alpha") and "origin/main" in line)
+    assert "checked out main" in alpha
+    assert "kept 3 of 4" in alpha
+    assert "1 by other authors" in alpha
+    assert "local is 1 ahead of origin/main" in out
+    assert "no remote - reading local HEAD" in out
+    assert "nothing is fetched" in out
+    # Gamma's .git is unreadable: reported as skipped, with git's reason.
+    assert "Gamma" in out and "git history:" in out
+
+
+def test_index_stores_commits_and_reports_them(tmp_path: Path, git_corpus: Path) -> None:
+    index_dir = tmp_path / "chroma"
+
+    result = run(
+        ["index"],
+        scan_root=git_corpus,
+        index_dir=index_dir,
+        factory=fake_factory,
+        config_root=git_config_root(tmp_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Indexed 3 documents and 4 commits across 3 projects" in result.output
+    sources = [m["source"] for m in ChunkStore(index_dir).all_metadata()]
+    assert "git" in sources and "doc" in sources
+
+
+def test_without_git_the_index_report_is_unchanged(tmp_path: Path, corpus: Path) -> None:
+    result = run(["index", "--dry-run"], scan_root=corpus, index_dir=tmp_path / "chroma", api_key="")
+
+    assert "commits" not in result.output
+    assert "Git history" not in result.output
+
+
+def test_a_commit_citation_names_the_commit_and_its_date() -> None:
+    from second_brain.answering import Answer, Citation
+    from second_brain.cli import format_answer
+    from second_brain.retrieval import RetrievedChunk
+
+    chunk = make_git_chunk()
+    passage = RetrievedChunk(
+        project=chunk.project,
+        rel_path=chunk.rel_path,
+        heading_path=chunk.heading_path,
+        chunk_index=0,
+        text=chunk.text,
+        score=0.9,
+        content_hash=chunk.content_hash,
+        mtime=chunk.mtime,
+        path=chunk.path,
+        source="git",
+        commit=chunk.commit,
+        author_date=chunk.author_date,
+    )
+    answer = Answer(
+        question="q",
+        answerable=True,
+        text="It verifies ownership [1].",
+        citations=(Citation(1, passage, "2026-07-02", "committed", False),),
+        passages=(passage,),
+        warnings=(),
+        model="m",
+    )
+
+    out = format_answer(answer)
+
+    assert (
+        "[1] DSA Tracker / commit b237453 > security: fix submitReview by verifying "
+        "problem ownership  (committed 2026-07-02)"
+    ) in out

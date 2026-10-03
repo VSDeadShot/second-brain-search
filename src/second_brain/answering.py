@@ -79,6 +79,19 @@ def _resolve_citations(
             dropped.append(number)
             continue
         chunk = passages[number - 1]
+        if chunk.source == "git":
+            # A commit is dated by its own author date and never changes; its
+            # `path` is the repo, which git would date by its latest commit.
+            kept.append(
+                Citation(
+                    number=number,
+                    chunk=chunk,
+                    date=chunk.author_date[:10] or "unknown",
+                    date_source="committed",
+                    changed_since_indexed=False,
+                )
+            )
+            continue
         dated = dates.date_for(chunk.path)
         kept.append(
             Citation(

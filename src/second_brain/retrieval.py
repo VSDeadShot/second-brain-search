@@ -48,6 +48,13 @@ class RetrievedChunk:
     """The file's modification time when it was indexed - freshness for citations."""
     path: str
     """Absolute path on disk. Citations date the file by asking git about it."""
+    source: str = "doc"
+    """"doc" or "git". Rows from an index built before commits were indexed read as docs."""
+    commit: str = ""
+    author: str = ""
+    author_email: str = ""
+    author_date: str = ""
+    """A commit's ISO author date - its citation date, instead of asking git about a path."""
 
 
 def _resolve_project(store: ChunkStore, project: str) -> str:
@@ -107,6 +114,11 @@ def retrieve(
                 content_hash=row["content_hash"],
                 mtime=row["mtime"],
                 path=row["path"],
+                source=row.get("source", "doc"),
+                commit=row.get("commit", ""),
+                author=row.get("author", ""),
+                author_email=row.get("author_email", ""),
+                author_date=row.get("author_date", ""),
             )
         )
         if len(results) == k:

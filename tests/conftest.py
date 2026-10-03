@@ -1,5 +1,7 @@
 """Shared fixtures. Every tree is synthetic - no test reads the real Projects folder."""
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,151 @@ def make_git_dir(path: Path) -> Path:
     """Mark a directory as a repo root the way a real clone does."""
     (path / ".git").mkdir(parents=True, exist_ok=True)
     return path
+
+
+# --- real git repos (git_history, and indexing with [git] enabled) ----------------
+
+# Made-up authors: no real name or address appears in a test.
+ME = ("Alice Example", "alice@example.com")
+TEAMMATE = ("Bob Teammate", "bob@example.org")
+GIT_DATE = "2026-07-02T10:00:00+05:30"
+
+
+def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.no-hooks", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, **(env or {})},
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def init_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    git(path, "init", "-q", "-b", "main")
+    git(path, "config", "user.name", ME[0])
+    git(path, "config", "user.email", ME[1])
+    return path
+
+
+def commit(
+    repo: Path,
+    message: str,
+    files: dict[str, str | bytes] | None = None,
+    *,
+    author: tuple[str, str] = ME,
+    date: str = GIT_DATE,
+) -> str:
+    for rel, content in (files or {}).items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8", newline="\n")
+    git(repo, "add", "-A")
+    env = {
+        "GIT_AUTHOR_NAME": author[0],
+        "GIT_AUTHOR_EMAIL": author[1],
+        "GIT_AUTHOR_DATE": date,
+        "GIT_COMMITTER_DATE": date,
+    }
+    git(repo, "commit", "-q", "--allow-empty", "-m", message, env=env)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def clone_with_origin(clone: Path, *, work: Path) -> Path:
+    """A clone of a bare origin holding one commit; upstream and origin live in `work`."""
+    upstream = init_repo(work / f"{clone.name}-upstream")
+    commit(upstream, "Initial commit", {"README.md": "hello\n"})
+    bare = work / f"{clone.name}-origin.git"
+    git(work, "clone", "-q", "--bare", str(upstream), str(bare))
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    git(work, "clone", "-q", str(bare), str(clone))
+    git(clone, "config", "user.name", ME[0])
+    git(clone, "config", "user.email", ME[1])
+    return clone
+
+
+def make_git_chunk(
+    *,
+    project: str = "DSA Tracker",
+    subject: str = "security: fix submitReview by verifying problem ownership",
+    body: str = "The submitReview endpoint now checks the problem belongs to the caller.",
+    author: tuple[str, str] = ME,
+    date: str = GIT_DATE,
+):
+    """One commit chunk, built the way indexing builds it, without a real repo."""
+    from datetime import datetime
+
+    from second_brain.git_history import Commit, commit_chunks, commit_text
+
+    commit_ = Commit(
+        hash="b237453" + "0" * 33,
+        parents=("a" * 40,),
+        author_name=author[0],
+        author_email=author[1],
+        author_date=datetime.fromisoformat(date),
+        subject=subject,
+        body=body,
+        files=("src/review.js",),
+    )
+    (chunk,) = commit_chunks(
+        commit_, commit_text(commit_, excerpt=""), project=project, repo_path=Path("/p") / project
+    )
+    return chunk
+
+
+ALPHA_README = (
+    "# Alpha\n\nAlpha tracks practice problems and reviews, described at realistic length.\n"
+)
+
+
+@pytest.fixture
+def git_corpus(tmp_path: Path) -> Path:
+    """Three projects whose history is real git, for indexing with [git] enabled.
+
+    root/
+      Alpha/   clone of an origin (origin/main is the default branch)
+               pushed: my fix + a teammate's commit; NOT pushed: one local commit
+      Beta/    `git init`, no remote - its local HEAD is what gets read
+      Gamma/   a bare `.git` directory that git cannot read - skipped with a reason
+    """
+    root = tmp_path / "root"
+    alpha = clone_with_origin(root / "Alpha", work=tmp_path / "remotes")
+    commit(alpha, "docs: describe Alpha", {"README.md": ALPHA_README})
+    commit(
+        alpha,
+        "security: fix submitReview by verifying problem ownership",
+        {"src/review.py": "def submit_review(user, problem):\n    check_owner(user, problem)\n"},
+    )
+    commit(
+        alpha,
+        "feat: teammate dashboard\n\nA teammate's change that must never be indexed.",
+        {"src/dash.py": "DASH = 1\n"},
+        author=TEAMMATE,
+    )
+    git(alpha, "push", "-q", "origin", "main")
+    commit(alpha, "wip: local experiment never pushed", {"src/wip.py": "WIP = 1\n"})
+
+    beta = init_repo(root / "Beta")
+    commit(
+        beta,
+        "feat: beta scheduler\n\nSchedules jobs with a priority queue and retries failures "
+        "with exponential backoff, so a flaky job cannot starve the rest.",
+        {
+            "README.md": "# Beta\n\nBeta is a job scheduler, and says so at some length here.\n",
+            "src/sched.py": "QUEUE = []\n",
+        },
+    )
+
+    gamma = make_git_dir(root / "Gamma")
+    make_file(gamma / "README.md", "# Gamma\n\nGamma has docs but a .git that git cannot read.")
+    return root
 
 
 @pytest.fixture

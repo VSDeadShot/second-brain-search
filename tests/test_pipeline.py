@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from second_brain.config import Config, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
+from second_brain.config import (
+    Config,
+    ConfigError,
+    DEFAULT_EXCLUDE_DIRS,
+    DEFAULT_INCLUDE_PATTERNS,
+)
 from second_brain.discovery import discover_documents
 from second_brain.embedding import DailyQuotaExceeded, EmbeddingError, GeminiEmbedder
 from second_brain.embedding_cache import EmbeddingCache
@@ -19,7 +25,7 @@ from second_brain.pipeline import (
 )
 from second_brain.store import ChunkStore, VectorSpaceMismatch
 
-from conftest import make_file, make_git_dir
+from conftest import ME, make_file, make_git_dir
 from fakes import (
     FailingEmbedder,
     FakeClock,
@@ -456,3 +462,110 @@ def test_collect_chunks_matches_what_indexing_stores(tmp_path: Path, corpus: Pat
     assert len(collected.chunks) == report.chunks
     assert collected.report.chunks_per_project == report.chunks_per_project
     assert {c.chunk_id for c in collected.chunks} == {m for m in store.all_ids()}
+
+
+# --- git history alongside docs ([git] enabled) -----------------------------------
+
+
+def git_config_for(root: Path, **overrides) -> Config:
+    settings = {"git_enabled": True, "git_author_emails": (ME[1],), **overrides}
+    return replace(config_for(root), **settings)
+
+
+def git_chunks(chunks) -> list:
+    return [c for c in chunks if c.source == "git"]
+
+
+def test_git_enabled_with_no_authors_refuses_before_reading_anything(tmp_path: Path) -> None:
+    config = git_config_for(tmp_path / "does-not-exist", git_author_emails=())
+
+    with pytest.raises(ConfigError, match="config.local.toml"):
+        collect_chunks(config)
+
+
+def test_names_alone_are_enough_to_index(git_corpus: Path) -> None:
+    config = git_config_for(git_corpus, git_author_emails=(), git_author_names=(ME[0],))
+
+    assert git_chunks(collect_chunks(config).chunks)
+
+
+def test_git_disabled_collects_docs_only(git_corpus: Path) -> None:
+    collected = collect_chunks(config_for(git_corpus))
+
+    assert git_chunks(collected.chunks) == []
+    assert collected.report.git_repos == []
+
+
+def test_commits_are_collected_alongside_docs(git_corpus: Path) -> None:
+    collected = collect_chunks(git_config_for(git_corpus))
+
+    subjects = {c.heading_path for c in git_chunks(collected.chunks)}
+    assert "security: fix submitReview by verifying problem ownership" in subjects
+    assert "feat: beta scheduler" in subjects
+    assert any(c.source == "doc" and c.project == "Alpha" for c in collected.chunks)
+    assert collected.report.chunks == len(collected.chunks)
+    assert collected.report.git_chunks == len(git_chunks(collected.chunks))
+
+
+def test_a_repo_with_a_remote_is_read_at_its_default_branch(git_corpus: Path) -> None:
+    collected = collect_chunks(git_config_for(git_corpus))
+
+    texts = " ".join(c.text for c in git_chunks(collected.chunks))
+    assert "verifying problem ownership" in texts
+    assert "never pushed" not in texts
+
+
+def test_other_authors_are_never_indexed(git_corpus: Path) -> None:
+    collected = collect_chunks(git_config_for(git_corpus))
+
+    assert {c.author_email for c in git_chunks(collected.chunks)} == {ME[1]}
+    assert "teammate" not in " ".join(c.text for c in git_chunks(collected.chunks))
+
+
+def test_the_report_describes_each_repo(git_corpus: Path) -> None:
+    report = collect_chunks(git_config_for(git_corpus)).report
+
+    repos = {r.project: r for r in report.git_repos}
+    assert set(repos) == {"Alpha", "Beta"}
+
+    alpha = repos["Alpha"]
+    assert alpha.ref == "origin/main"
+    assert alpha.branch == "main"
+    assert alpha.commits == 4  # initial + docs + fix + teammate; the local one is not read
+    assert alpha.kept == 3
+    assert alpha.other_authors == 1
+    assert "local is 1 ahead of origin/main" in alpha.flags
+
+    beta = repos["Beta"]
+    assert beta.ref == "HEAD"
+    assert beta.flags == ("no remote - reading local HEAD",)
+    assert beta.chunks == 1
+
+
+def test_a_repo_git_cannot_read_is_skipped_with_a_reason(git_corpus: Path) -> None:
+    collected = collect_chunks(git_config_for(git_corpus))
+
+    reasons = {Path(path).name: reason for path, reason in collected.report.skipped}
+    assert "Gamma" in reasons
+    assert "git" in reasons["Gamma"]
+    # Its docs are still indexed.
+    assert any(c.project == "Gamma" for c in collected.chunks)
+
+
+def test_per_project_counts_include_commits(git_corpus: Path) -> None:
+    collected = collect_chunks(git_config_for(git_corpus))
+
+    beta_total = sum(1 for c in collected.chunks if c.project == "Beta")
+    assert collected.report.chunks_per_project["Beta"] == beta_total
+    assert beta_total > len([c for c in collected.chunks if c.project == "Beta" and c.source == "doc"])
+
+
+def test_git_chunks_are_stored_with_their_metadata(tmp_path: Path, git_corpus: Path) -> None:
+    store = ChunkStore(tmp_path / "chroma")
+
+    index_documents(git_config_for(git_corpus), FakeEmbedder(), store)
+
+    stored = [m for m in store.all_metadata() if m.get("source") == "git"]
+    assert stored
+    assert all(m["commit"] and m["author_email"] == ME[1] for m in stored)
+    assert all(m["rel_path"].startswith("commit ") for m in stored)

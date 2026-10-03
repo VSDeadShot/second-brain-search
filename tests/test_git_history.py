@@ -8,8 +8,6 @@ file looks like a credential.
 from __future__ import annotations
 
 import hashlib
-import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -31,59 +29,9 @@ from second_brain.git_history import (
     repo_status,
 )
 
-ME = ("Alice Example", "alice@example.com")
-TEAMMATE = ("Bob Teammate", "bob@example.org")
+from conftest import ME, TEAMMATE, clone_with_origin, commit, git, init_repo
+
 DATE = "2026-07-02T10:00:00+05:30"
-
-
-# --- temp repo helpers -------------------------------------------------------
-
-
-def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.no-hooks", *args],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env={**os.environ, **(env or {})},
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-def init_repo(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    git(path, "init", "-q", "-b", "main")
-    git(path, "config", "user.name", ME[0])
-    git(path, "config", "user.email", ME[1])
-    return path
-
-
-def commit(
-    repo: Path,
-    message: str,
-    files: dict[str, str | bytes] | None = None,
-    *,
-    author: tuple[str, str] = ME,
-    date: str = DATE,
-) -> str:
-    for rel, content in (files or {}).items():
-        path = repo / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(content, bytes):
-            path.write_bytes(content)
-        else:
-            path.write_text(content, encoding="utf-8", newline="\n")
-    git(repo, "add", "-A")
-    env = {
-        "GIT_AUTHOR_NAME": author[0],
-        "GIT_AUTHOR_EMAIL": author[1],
-        "GIT_AUTHOR_DATE": date,
-        "GIT_COMMITTER_DATE": date,
-    }
-    git(repo, "commit", "-q", "--allow-empty", "-m", message, env=env)
-    return git(repo, "rev-parse", "HEAD")
 
 
 def make_commit(
@@ -612,68 +560,121 @@ def test_collect_repo_history_end_to_end(tmp_path: Path) -> None:
     assert "Diff excerpt:" not in by_commit[detailed].text
 
 
-# --- repo status (for the dry run) -------------------------------------------------
+# --- repo status: which ref is read, and how local compares (for the dry run) ------
 
 
-def _clone_with_origin(tmp_path: Path) -> Path:
-    upstream = init_repo(tmp_path / "upstream")
-    commit(upstream, "Initial commit", {"README.md": "hello\n"})
-    bare = tmp_path / "origin.git"
-    git(tmp_path, "clone", "-q", "--bare", str(upstream), str(bare))
-    clone = tmp_path / "clone"
-    git(tmp_path, "clone", "-q", str(bare), str(clone))
-    git(clone, "config", "user.name", ME[0])
-    git(clone, "config", "user.email", ME[1])
-    return clone
-
-
-def test_status_of_a_clean_clone_on_its_default_branch_has_no_flags(tmp_path: Path) -> None:
-    clone = _clone_with_origin(tmp_path)
+def test_a_clean_clone_reads_its_remote_default_branch_with_no_flags(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
 
     status = repo_status(clone)
 
+    assert status.ref == "origin/main"
     assert status.branch == "main"
     assert status.default_branch == "main"
-    assert status.unpushed == 0
+    assert (status.ahead, status.behind) == (0, 0)
     assert status.flags == []
 
 
-def test_status_flags_a_repo_off_its_default_branch(tmp_path: Path) -> None:
-    clone = _clone_with_origin(tmp_path)
+def test_the_default_branch_is_found_without_origin_head(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
+    git(clone, "remote", "set-head", "origin", "--delete")
+
+    assert repo_status(clone).ref == "origin/main"
+
+
+def test_status_flags_a_checkout_off_the_default_branch(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
     git(clone, "checkout", "-q", "-b", "experiment")
 
     status = repo_status(clone)
 
+    assert status.ref == "origin/main"  # still reads the default branch
     assert status.branch == "experiment"
-    assert any("experiment" in flag and "main" in flag for flag in status.flags)
+    assert "checked out experiment, not main" in status.flags
 
 
-def test_status_counts_unpushed_commits(tmp_path: Path) -> None:
-    clone = _clone_with_origin(tmp_path)
+def test_status_flags_local_commits_ahead_of_the_ref_read(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
     commit(clone, "feat: local only", {"local.py": "l = 1\n"})
     commit(clone, "feat: also local", {"local2.py": "l = 2\n"})
 
     status = repo_status(clone)
 
-    assert status.unpushed == 2
-    assert any("2 unpushed" in flag for flag in status.flags)
+    assert (status.ahead, status.behind) == (2, 0)
+    assert "local is 2 ahead of origin/main" in status.flags
 
 
-def test_status_flags_a_repo_with_no_remote(tmp_path: Path) -> None:
+def test_status_flags_local_behind_the_ref_read(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
+    commit(clone, "feat: pushed then dropped locally", {"x.py": "x = 1\n"})
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "reset", "-q", "--hard", "HEAD~1")
+
+    status = repo_status(clone)
+
+    assert (status.ahead, status.behind) == (0, 1)
+    assert "local is 1 behind origin/main" in status.flags
+
+
+def test_a_repo_with_no_remote_reads_local_head(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     commit(repo, "Initial commit", {"README.md": "hello\n"})
 
     status = repo_status(repo)
 
+    assert status.ref == "HEAD"
     assert not status.has_remote
-    assert status.flags == ["no remote"]
+    assert status.flags == ["no remote - reading local HEAD"]
+
+
+def test_a_remote_with_no_default_branch_falls_back_to_local_head(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    commit(repo, "Initial commit", {"README.md": "hello\n"})
+    git(repo, "remote", "add", "origin", str(tmp_path / "never-fetched.git"))
+
+    status = repo_status(repo)
+
+    assert status.ref == "HEAD"
+    assert status.has_remote
+    assert "default branch unknown - reading local HEAD" in status.flags
 
 
 def test_status_flags_a_detached_head(tmp_path: Path) -> None:
-    clone = _clone_with_origin(tmp_path)
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
     git(clone, "checkout", "-q", "--detach")
 
     status = repo_status(clone)
 
     assert status.branch is None
     assert "detached HEAD" in status.flags
+
+
+def test_read_commits_reads_the_ref_it_is_given(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
+    commit(clone, "feat: local only", {"local.py": "l = 1\n"})
+
+    pushed = [c.subject for c in read_commits(clone, ref="origin/main")]
+    local = [c.subject for c in read_commits(clone)]
+
+    assert pushed == ["Initial commit"]
+    assert local == ["feat: local only", "Initial commit"]
+
+
+def test_a_ref_that_looks_like_an_option_is_refused(tmp_path: Path) -> None:
+    repo = init_repo(tmp_path / "repo")
+    commit(repo, "Initial commit", {"README.md": "hello\n"})
+
+    with pytest.raises(ValueError):
+        read_commits(repo, ref="--output=x")
+
+
+def test_collect_repo_history_reads_the_given_ref(tmp_path: Path) -> None:
+    clone = clone_with_origin(tmp_path / "clone", work=tmp_path)
+    commit(clone, "feat: local only, never pushed", {"local.py": "l = 1\n"})
+
+    history = collect_repo_history(
+        clone, project="Clone", ref="origin/main", author_emails=[ME[1]], author_names=[]
+    )
+
+    assert history.commits == 1
+    assert all("never pushed" not in c.text for c in history.chunks)

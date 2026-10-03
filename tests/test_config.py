@@ -136,3 +136,101 @@ def test_a_blank_generation_model_falls_back_to_the_default(tmp_path: Path) -> N
     )
 
     assert cfg.generation_model == "gemini-3.5-flash-lite"
+
+
+# --- [git] ---------------------------------------------------------------------
+
+
+def _scan(tmp_path: Path) -> dict[str, str]:
+    scan = tmp_path / "projects"
+    scan.mkdir()
+    return {"SBS_SCAN_ROOT": str(scan)}
+
+
+def test_git_history_is_off_by_default_in_code(tmp_path: Path) -> None:
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.git_enabled is False
+    assert cfg.git_author_emails == ()
+    assert cfg.git_author_names == ()
+    assert cfg.git_diff_excerpt_chars == 800
+    assert cfg.git_thin_message_chars == 200
+
+
+def test_git_settings_are_read_from_config_toml(tmp_path: Path) -> None:
+    write_toml(
+        tmp_path / "config.toml",
+        "[git]\nenabled = true\nauthor_emails = []\nauthor_names = []\n"
+        "diff_excerpt_chars = 500\nthin_message_chars = 150\n",
+    )
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.git_enabled is True
+    assert cfg.git_diff_excerpt_chars == 500
+    assert cfg.git_thin_message_chars == 150
+
+
+def test_config_local_toml_supplies_the_authors_and_keeps_the_rest(tmp_path: Path) -> None:
+    write_toml(
+        tmp_path / "config.toml",
+        "[git]\nenabled = true\nauthor_emails = []\nauthor_names = []\n",
+    )
+    write_toml(
+        tmp_path / "config.local.toml",
+        '[git]\nauthor_emails = ["me@example.com"]\nauthor_names = ["Me Myself"]\n',
+    )
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.git_enabled is True  # from config.toml, untouched by the local file
+    assert cfg.git_author_emails == ("me@example.com",)
+    assert cfg.git_author_names == ("Me Myself",)
+
+
+def test_a_local_discovery_table_does_not_reset_git_settings(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.toml", "[git]\nenabled = true\n")
+    write_toml(tmp_path / "config.local.toml", '[discovery]\ninclude_dirs = ["notes"]\n')
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.git_enabled is True
+    assert cfg.include_dirs == ("notes",)
+
+
+def test_unknown_git_key_is_rejected(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.toml", '[git]\nauthor_email = ["typo@example.com"]\n')
+
+    with pytest.raises(ConfigError, match="author_email"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'enabled = "yes"',
+        'author_emails = "me@example.com"',
+        "author_names = [1, 2]",
+        "diff_excerpt_chars = 0",
+        "thin_message_chars = -5",
+        'thin_message_chars = "200"',
+        "diff_excerpt_chars = true",
+    ],
+)
+def test_badly_typed_git_values_are_rejected(tmp_path: Path, body: str) -> None:
+    write_toml(tmp_path / "config.toml", f"[git]\n{body}\n")
+
+    with pytest.raises(ConfigError, match=r"\[git\]"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+def test_committed_config_enables_git_with_no_author_values() -> None:
+    """The real author lists belong only in the gitignored config.local.toml."""
+    import tomllib
+
+    committed = Path(__file__).resolve().parents[1] / "config.toml"
+    table = tomllib.loads(committed.read_text(encoding="utf-8"))["git"]
+
+    assert table["enabled"] is True
+    assert table["author_emails"] == []
+    assert table["author_names"] == []

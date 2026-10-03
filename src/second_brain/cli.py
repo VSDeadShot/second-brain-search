@@ -92,9 +92,12 @@ def _as_dict(doc: DiscoveredDoc) -> dict[str, object]:
     }
 
 
-def _load_config_or_fail() -> Config:
+def _load_config_or_fail(ctx: click.Context) -> Config:
+    # Tests point `config_root` at a temp folder so they never read the repo's
+    # config.toml or the owner's config.local.toml; production leaves it unset.
+    config_root = ctx.obj.get("config_root")
     try:
-        return load_config()
+        return load_config(Path(config_root) if config_root is not None else None)
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -117,14 +120,53 @@ def _skipped_lines(report: IndexReport) -> list[str]:
     return [f"Skipped {count} {noun}:"] + [f"  {path}: {reason}" for path, reason in report.skipped]
 
 
+def _sources(report: IndexReport) -> str:
+    """'3 documents', or '3 documents and 4 commits' when history was read."""
+    if not report.git_repos:
+        return f"{report.documents} documents"
+    kept = sum(repo.kept for repo in report.git_repos)
+    return f"{report.documents} documents and {kept} commits"
+
+
+def _git_lines(report: IndexReport) -> list[str]:
+    """Per repo: the ref read, what is checked out, what was kept, and any flags."""
+    repos = report.git_repos
+    if not repos:
+        return []
+
+    name_width = max(len(r.project) for r in repos)
+    ref_width = max(len(r.ref) for r in repos)
+    lines = ["Git history (remote default branch as last fetched - nothing is fetched):"]
+    for r in repos:
+        checked_out = r.branch if r.branch is not None else "(detached)"
+        lines.append(
+            f"  {r.project:<{name_width}}  {r.ref:<{ref_width}}  checked out {checked_out}  "
+            f"kept {r.kept} of {r.commits}, {r.other_authors} by other authors "
+            f"-> {r.chunks} chunks"
+        )
+        lines += [f"  {'':<{name_width}}  ! {flag}" for flag in r.flags]
+
+    commits = sum(r.commits for r in repos)
+    kept = sum(r.kept for r in repos)
+    lines.append(
+        f"  Total: kept {kept} of {commits} commits -> {report.git_chunks} chunks. "
+        f"Excluded {sum(r.merges for r in repos)} merges, "
+        f"{sum(r.version_bumps for r in repos)} version bumps, "
+        f"{sum(r.other_authors for r in repos)} by other authors. "
+        f"{sum(r.with_excerpt for r in repos)} thin commits got a diff excerpt."
+    )
+    return lines + [""]
+
+
 def format_index_report(report: IndexReport, *, elapsed: float, index_dir: Path) -> str:
     lines = [
-        f"Indexed {report.documents} documents across {report.projects} projects "
+        f"Indexed {_sources(report)} across {report.projects} projects "
         f"-> {report.chunks} chunks ({elapsed:.1f}s)",
         f"Embedded {report.embedded} new texts, reused {report.reused} saved.",
         "",
         *_project_lines(report),
         "",
+        *_git_lines(report),
         *_skipped_lines(report),
         f"Index: {index_dir}",
     ]
@@ -171,11 +213,12 @@ def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
     lines = [
         "Dry run - nothing embedded, nothing written.",
         "",
-        f"Would index {report.documents} documents across {report.projects} projects "
+        f"Would index {_sources(report)} across {report.projects} projects "
         f"-> {report.chunks} chunks",
         "",
         *_project_lines(report),
         "",
+        *_git_lines(report),
         *_skipped_lines(report),
         *saved,
         f"Estimated embedding requests: {requests} "
@@ -197,9 +240,10 @@ def cli(ctx: click.Context) -> None:
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit the raw document list as JSON.")
-def discover(as_json: bool) -> None:
+@click.pass_context
+def discover(ctx: click.Context, as_json: bool) -> None:
     """List the documentation files that would be indexed."""
-    config = _load_config_or_fail()
+    config = _load_config_or_fail(ctx)
     docs = discover_documents(config)
 
     if as_json:
@@ -240,12 +284,17 @@ def discover(as_json: bool) -> None:
 def index(ctx: click.Context, dry_run: bool) -> None:
     """Rebuild the search index from scratch."""
     started = time.perf_counter()
-    config = _load_config_or_fail()
+    config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
     cache_path = Path(ctx.obj.get("cache_path", DEFAULT_CACHE_PATH))
 
     click.echo(f"Scanning {config.scan_root}")
-    collected = collect_chunks(config)
+    try:
+        collected = collect_chunks(config)
+    except ConfigError as exc:
+        # Refused before anything is embedded or written.
+        note = "" if dry_run else " " + _index_unchanged_note(_existing_chunk_count(index_dir))
+        raise click.ClickException(f"{exc}{note}") from exc
     total = len(collected.chunks)
 
     if dry_run:
@@ -343,7 +392,7 @@ def format_search_results(query: str, results: Sequence[RetrievedChunk]) -> str:
 @click.pass_context
 def search(ctx: click.Context, query: str, k: int, project: str | None) -> None:
     """Show the chunks most relevant to QUERY, with citations. Costs one embedded text."""
-    config = _load_config_or_fail()
+    config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
 
     # Checked before opening the store, which would otherwise create .chroma/.
@@ -384,7 +433,7 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
 
     Retrieval only - nothing is generated. Costs one embedded text per question.
     """
-    config = _load_config_or_fail()
+    config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
     suite_path = Path(fixture) if fixture is not None else DEFAULT_EVAL_SUITE
     reports_dir = Path(out_dir) if out_dir is not None else DEFAULT_EVAL_OUT_DIR
@@ -501,7 +550,7 @@ def ask(ctx: click.Context, question: str, k: int, project: str | None, show_con
     Costs one embedded text and one generation request. An answer that cites
     nothing is shown as a refusal - there would be nothing to check it against.
     """
-    config = _load_config_or_fail()
+    config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
 
     # Checked before opening the store, which would otherwise create .chroma/.
