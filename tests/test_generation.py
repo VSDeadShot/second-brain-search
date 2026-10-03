@@ -215,6 +215,21 @@ def test_the_call_uses_the_configured_model_and_asks_for_json() -> None:
     assert call["config"].response_schema is not None
 
 
+def test_automatic_function_calling_is_off() -> None:
+    # No tools are passed, but google-genai still runs its AFC loop - and prints a
+    # warning above every `sbs ask` answer - unless the config disables it.
+    from google.genai import _extra_utils
+
+    models = StubGenerationModels()
+
+    generator(models).generate("q", [chunk()])
+    config = models.calls[0]["config"]
+
+    assert config.automatic_function_calling.disable is True
+    # The SDK's own check, which decides whether the warning path runs at all.
+    assert _extra_utils.should_disable_afc(config) is True
+
+
 def test_the_prompt_sent_is_the_prompt_we_built() -> None:
     models = StubGenerationModels()
 

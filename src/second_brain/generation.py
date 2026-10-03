@@ -217,6 +217,9 @@ class GeminiGenerator:
             temperature=0,
             response_mime_type="application/json",
             response_schema=RESPONSE_SCHEMA,
+            # No tools are passed, but the SDK still enters its function-calling loop
+            # unless told not to, and warns about it on stderr above every answer.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
     def generate(self, question: str, passages: Sequence[RetrievedChunk]) -> RawAnswer:
