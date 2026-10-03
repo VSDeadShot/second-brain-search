@@ -8,8 +8,10 @@
 # question; they are reported but never scored.
 #
 # Each question is scored by one check, chosen by the fields it carries:
-# - `expected_text`: a passage in the top k must contain one of these strings
-#   (case-insensitive, whitespace collapsed, otherwise exact). For facts.
+# - `expected_text`: a passage in the top k FROM ONE OF `expected_projects` must contain
+#   one of these strings (case-insensitive, whitespace collapsed, otherwise exact). For
+#   facts. The project scoping matters since git history is indexed: this tool's own
+#   eval commits quote the strings they test for.
 # - `expected_projects` alone: every listed project must appear in the top k. For
 #   "which of my projects..." questions, where the projects are the answer.
 # - `expected_projects = []`: nothing in the corpus answers it. Scores are kept,
@@ -26,6 +28,11 @@
 #
 # 2026-10-03: Q12 added, answered only by a commit message. It fails until git history is
 # indexed, and is the target for that slice.
+#
+# 2026-10-03, after git history was indexed: Q5 became a text check (its fix is commit
+# b237453, now indexed), Q9 also accepts the subject of the commit that built its answer, and
+# Q13 replaces Q5 as the third no-answer question - a trap whose lure is another project's
+# commit.
 #
 # Rules for expected_text strings:
 # - VERBATIM ONLY. Every string must be a phrasing that exists in the corpus as
@@ -107,13 +114,16 @@ Not "read-modify-write", which also appears in budget-app's CLAUDE.md.
 id = "q5-dsa-review-security"
 category = "how-did-i"
 text = "What security bug did I find in the DSA Tracker's review endpoint, and how did I fix it?"
-expected_projects = []
+expected_projects = ["DSA Tracker"]
+expected_text = ["submitReview authorization vulnerability"]
 notes = """
-NOT answerable from the indexed corpus. DSA Tracker's only markdown is CLAUDE.md and README.md,
-neither of which mentions it. The fix exists only in git history: commit b237453
-"security: Fix submitReview authorization vulnerability by verifying problem ownership".
-v1 scored this on the project check, where DSA Tracker coming back was a pass that could not
-fail. Now a no-answer question, kept to watch for false confidence.
+Answered by DSA Tracker commit b237453 (2026-07-02), "security: Fix submitReview
+authorization vulnerability by verifying problem ownership"; neither of DSA Tracker's docs
+mentions it. Until git history was indexed this was a no-answer question; on 2026-10-03,
+after the backfill, `sbs ask` answered it citing b237453 alone. The string names the bug
+rather than the fix, so it differs from Q12's. Counted 2026-10-03: in DSA Tracker only in
+b237453; elsewhere only in this tool's own commit adfd8ac, which quotes it and does not
+count - text matches are scoped to expected_projects.
 """
 
 [[question]]
@@ -144,11 +154,15 @@ id = "q9-signin-hammering"
 category = "trap"
 text = "How do I stop someone hammering my sign-in endpoint?"
 expected_projects = ["Interview Flashcards"]
-expected_text = ["LoginRateLimit"]
+expected_text = ["LoginRateLimit", "Rate-limit sign-in attempts"]
 also_in_corpus = ["Shweta's Website"]
 notes = """
 Phrased with no keywords shared with the docs on purpose. The answer is LoginRateLimit
 (CLAUDE.md:126-128) and docs/api-contract.md:211-212 (429 + Retry-After, rolling 15 minutes).
+Since git history was indexed, Interview Flashcards commit 705b8d7 "feat(backend): Rate-limit
+sign-in attempts" - the commit that built it - ranks first, and "LoginRateLimit" sits only in a
+later piece of it. Its subject phrase counts too: 1 chunk in the index (705b8d7 #0), counted
+2026-10-03.
 """
 
 [[question]]
@@ -192,4 +206,23 @@ and the 9-line diff says how: the problem is looked up and its user_id compared 
 signed-in user's before the review is recorded. The string is in that commit message only -
 0 indexed doc chunks, 1 commit across all 16 repos, counted 2026-10-03. "IDOR" appears
 nowhere, so this is also a vocabulary gap, like Q9. Q5 asks for the same fix in plain words.
+Once this tool's own history was indexed, its commit adfd8ac (which added Q12) quotes the
+string too; it does not count, as text matches are scoped to expected_projects.
+"""
+
+[[question]]
+id = "q13-macro-push-notifications"
+category = "trap"
+text = "How did I set up push notifications or meal reminders for Macro Tracker?"
+expected_projects = []
+notes = """
+Nothing in Macro Tracker answers this: on 2026-10-03 none of its 83 indexed chunks, docs or
+commits, matched notif or remind, and no chunk anywhere matched FCM, Firebase Messaging,
+OneSignal or web push. The lure is cross-project and comes from git history: the corpus's
+only push-notification passage is ToDoApp commit cacd64b "feat: add native push
+notifications". `sbs ask` must refuse rather than credit ToDoApp's notifications to Macro
+Tracker. On 2026-10-03 it refused, but the lure never reached the context: the project name
+pulled in 5 macro-tracker passages (top 0.63, the per-project cap), so this run tested the
+project pull, not the lure. Stays a trap only while Macro Tracker has no notifications or
+reminders.
 """

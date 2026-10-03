@@ -121,7 +121,7 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     by_id = {q.id: q for q in suite.questions}
 
     assert suite.version == 2
-    assert len(suite.questions) == len(by_id) == 13
+    assert len(suite.questions) == len(by_id) == 14
     assert all(q.text and q.category for q in suite.questions)
     assert "q1-flashcards-model" not in by_id
     # DECISIONS.md records the move from 3.7 to 3.6 and why. 3.7 is also in that
@@ -131,11 +131,12 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     assert q1b.check == "text"
     assert q1b.expected_text == ("experiencing high demand",)
     # Nothing in the corpus answers these three.
-    assert by_id["q10-kubernetes"].check == "no-answer"
-    assert by_id["q11-flashcards-error-monitoring"].check == "no-answer"
-    assert by_id["q5-dsa-review-security"].check == "no-answer"
-    # Q5's fix lives only in git history, which the index does not cover.
-    assert "git" in by_id["q5-dsa-review-security"].notes.lower()
+    traps = [q.id for q in suite.questions if q.check == "no-answer"]
+    assert traps == ["q10-kubernetes", "q11-flashcards-error-monitoring", "q13-macro-push-notifications"]
+    # Q13's lure: the corpus's only push-notification passage is another project's commit.
+    q13 = by_id["q13-macro-push-notifications"]
+    assert q13.category == "trap"
+    assert "cacd64b" in q13.notes
 
 
 def test_fact_questions_carry_the_string_that_states_the_fact() -> None:
@@ -147,11 +148,20 @@ def test_fact_questions_carry_the_string_that_states_the_fact() -> None:
         "20 generations per owner per day",
     )
     assert by_id["q4-omnitask-lost-writes"].expected_text == ("swaps the file in atomically",)
-    assert by_id["q9-signin-hammering"].expected_text == ("LoginRateLimit",)
+    # CLAUDE.md's class name, or the subject of the commit that built it (705b8d7).
+    assert by_id["q9-signin-hammering"].expected_text == (
+        "LoginRateLimit",
+        "Rate-limit sign-in attempts",
+    )
     # Answered only by a commit message, never by a doc: the target for git history.
     q12 = by_id["q12-dsa-idor-fix"]
     assert q12.expected_projects == ("DSA Tracker",)
     assert q12.expected_text == ("verifying problem ownership",)
+    # The same fix in plain words, now answerable: b237453's subject names the bug.
+    q5 = by_id["q5-dsa-review-security"]
+    assert q5.check == "text"
+    assert q5.expected_projects == ("DSA Tracker",)
+    assert q5.expected_text == ("submitReview authorization vulnerability",)
     # Q3 has no string rare enough to trust, and the cross-project questions are
     # answered by the projects themselves: all stay on the project check.
     for qid in ("q3-watch-next-auth", "q6-rate-limiting", "q7-gemini-projects", "q8-spaced-repetition"):
@@ -442,6 +452,49 @@ def test_a_match_reports_its_rank_and_location() -> None:
 
     assert outcome.text_matches == (
         TextMatch("gemini-3.7-flash", 2, "Interview Flashcards", "plans/p.md", 21),
+    )
+
+
+IDOR = ("verifying problem ownership",)
+
+
+def test_a_string_only_in_a_non_expected_project_does_not_count() -> None:
+    """With git history indexed, this tool's own eval commits quote the answers they
+    test for. A quote in another project is not that project's answer."""
+    outcome = evaluate_question(
+        _question(expected=("DSA Tracker",), texts=IDOR),
+        [
+            passage("q12 expects ... by verifying problem ownership", project="Second Brain"),
+            passage("Unrelated review code.", project="DSA Tracker", index=1),
+        ],
+    )
+
+    assert outcome.passed is False
+    assert outcome.text_matches == ()
+
+
+def test_a_string_in_an_expected_project_passes() -> None:
+    outcome = evaluate_question(
+        _question(expected=("DSA Tracker",), texts=IDOR),
+        [passage("Fix submitReview by verifying problem ownership", project="DSA Tracker")],
+    )
+
+    assert outcome.passed is True
+
+
+def test_the_match_is_the_expected_projects_passage_not_an_earlier_quote() -> None:
+    from second_brain.evaluation import TextMatch
+
+    outcome = evaluate_question(
+        _question(expected=("DSA Tracker",), texts=IDOR),
+        [
+            passage("quotes: verifying problem ownership", project="Second Brain", rel_path="commit adfd8ac"),
+            passage("Fix submitReview by verifying problem ownership", project="DSA Tracker", rel_path="commit b237453", index=1),
+        ],
+    )
+
+    assert outcome.text_matches == (
+        TextMatch("verifying problem ownership", 2, "DSA Tracker", "commit b237453", 1),
     )
 
 

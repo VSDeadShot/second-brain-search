@@ -212,19 +212,20 @@ def _normalise(text: str) -> str:
 
 
 def _text_matches(
-    expected: Sequence[str], results: Sequence[RetrievedChunk]
+    expected: Sequence[str], projects: Sequence[str], results: Sequence[RetrievedChunk]
 ) -> tuple[TextMatch, ...]:
-    """The first passage containing each expected string.
+    """The first passage from an expected project containing each expected string.
 
     Only the passage text counts. A heading that names the fact is not a passage
-    stating it.
+    stating it. Nor does a passage from another project: once git history is
+    indexed, this tool's own eval commits quote the very strings they test for.
     """
     haystacks = [_normalise(r.text) for r in results]
     matches = []
     for needle in expected:
         wanted = _normalise(needle)
         for rank, (result, haystack) in enumerate(zip(results, haystacks), start=1):
-            if wanted in haystack:
+            if result.project in projects and wanted in haystack:
                 matches.append(
                     TextMatch(needle, rank, result.project, result.rel_path, result.chunk_index)
                 )
@@ -250,7 +251,7 @@ def evaluate_question(
         best = f"top score {top_score:.3f}" if top_score is not None else "nothing retrieved"
         reason = f"expects no answer; {best}"
     elif question.check == CHECK_TEXT:
-        matches = _text_matches(question.expected_text, results)
+        matches = _text_matches(question.expected_text, question.expected_projects, results)
         passed = bool(matches)
         if matches:
             m = matches[0]
