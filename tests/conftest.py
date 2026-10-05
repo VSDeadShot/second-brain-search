@@ -280,3 +280,69 @@ def doc_factory(tmp_path: Path):
         )
 
     return make
+
+
+# --- MCP server: a corpus with more chunks than the default k --------------------
+
+# Over 240 characters, so a search that returned the CLI's snippet instead of the
+# full passage would be caught.
+LONG_CACHING_PASSAGE = (
+    "# Caching\n\nThe caching layer keeps show metadata in redis with a ttl, so "
+    "repeated caching lookups skip the upstream api entirely. Cache keys carry the "
+    "api version, so a schema change never serves a stale shape, and every caching "
+    "miss is logged with its latency so slow upstream calls show up in the caching "
+    "dashboard before users notice them."
+)
+
+
+@pytest.fixture
+def search_corpus(tmp_path: Path) -> Path:
+    """Seven docs across three projects. "Hidden" is the one the server must hide,
+    and it is the best match for caching questions - a leak would rank first."""
+    root = tmp_path / "search_corpus"
+    alpha = make_git_dir(root / "Alpha")
+    make_file(alpha / "README.md", LONG_CACHING_PASSAGE)
+    make_file(alpha / "CLAUDE.md", "# Storage\n\nPages are written to disk through a buffer pool and a write ahead log.")
+    make_file(alpha / "docs" / "auth.md", "# Auth\n\nSessions are signed cookies, rotated on every login and checked on each request.")
+    beta = make_git_dir(root / "Beta")
+    make_file(beta / "README.md", "# Photos\n\nMeal photos are compressed client side with a canvas before upload.")
+    make_file(beta / "CLAUDE.md", "# Caching\n\nA small caching layer memoises the nutrition lookups for an hour.")
+    make_file(beta / "docs" / "deploy.md", "# Deploy\n\nThe app deploys from main through a container build and a health check.")
+    hidden = make_git_dir(root / "Hidden")
+    make_file(hidden / "README.md", "# Caching\n\nHidden caching notes: caching caching caching with a private cache warmer.")
+    return root
+
+
+def index_corpus(corpus: Path, index_dir: Path, embedder) -> "ChunkStore":
+    """Index `corpus` the way `sbs index` does, recording `embedder`'s vector space."""
+    from second_brain.config import DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS, Config
+    from second_brain.pipeline import collect_chunks, store_chunks
+    from second_brain.store import ChunkStore
+
+    config = Config(
+        scan_root=corpus,
+        gemini_api_key=None,
+        include_patterns=DEFAULT_INCLUDE_PATTERNS,
+        include_dirs=("docs",),
+        exclude_dirs=DEFAULT_EXCLUDE_DIRS,
+        exclude_paths=(),
+    )
+    store = ChunkStore(index_dir)
+    store_chunks(collect_chunks(config), embedder, store, rebuild=True)
+    return store
+
+
+def stub_gemini_embedder(models=None):
+    """The real GeminiEmbedder over a stub client - its vector space is Gemini's, so a
+    store built with it accepts queries from the server's own embedder."""
+    from second_brain.embedding import DEFAULT_DIMENSIONS, GeminiEmbedder
+
+    from fakes import StubClient, StubModels
+
+    models = models if models is not None else StubModels(dimensions=DEFAULT_DIMENSIONS)
+    return GeminiEmbedder(
+        client=StubClient(models),
+        items_per_minute=None,
+        tokens_per_minute=None,
+        sleep=lambda _seconds: None,
+    )

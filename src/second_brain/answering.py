@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .embedding import Embedder
-from .freshness import DateLookup
+from .freshness import DateLookup, FileDate
 from .generation import Generator, RawAnswer
 from .retrieval import DEFAULT_ANSWER_K, RetrievedChunk, retrieve_for_answer
 from .store import ChunkStore
@@ -68,6 +68,14 @@ def _refusal(
     )
 
 
+def chunk_date(chunk: RetrievedChunk, dates: DateLookup) -> FileDate:
+    """When a passage was written. A commit is dated by its own author date and never
+    changes; its `path` is the repo, which git would date by its latest commit."""
+    if chunk.source == "git":
+        return FileDate(chunk.author_date[:10] or "unknown", "committed")
+    return dates.date_for(chunk.path)
+
+
 def _resolve_citations(
     raw: RawAnswer, passages: Sequence[RetrievedChunk], dates: DateLookup
 ) -> tuple[tuple[Citation, ...], tuple[str, ...]]:
@@ -79,27 +87,16 @@ def _resolve_citations(
             dropped.append(number)
             continue
         chunk = passages[number - 1]
-        if chunk.source == "git":
-            # A commit is dated by its own author date and never changes; its
-            # `path` is the repo, which git would date by its latest commit.
-            kept.append(
-                Citation(
-                    number=number,
-                    chunk=chunk,
-                    date=chunk.author_date[:10] or "unknown",
-                    date_source="committed",
-                    changed_since_indexed=False,
-                )
-            )
-            continue
-        dated = dates.date_for(chunk.path)
+        dated = chunk_date(chunk, dates)
         kept.append(
             Citation(
                 number=number,
                 chunk=chunk,
                 date=dated.date,
                 date_source=dated.source,
-                changed_since_indexed=dates.changed_since_indexed(chunk.path, chunk.mtime),
+                changed_since_indexed=(
+                    chunk.source != "git" and dates.changed_since_indexed(chunk.path, chunk.mtime)
+                ),
             )
         )
 

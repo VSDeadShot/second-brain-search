@@ -294,3 +294,36 @@ def test_committed_config_leaves_exclude_projects_unset() -> None:
 
     assert "mcp" in raw
     assert "exclude_projects" not in raw["mcp"]
+
+
+def test_max_searches_defaults_to_50(tmp_path: Path) -> None:
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.mcp_max_searches == 50
+
+
+def test_max_searches_can_be_set_locally_without_touching_the_exclusions(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.toml", "[mcp]\nmax_searches = 50\n")
+    write_toml(tmp_path / "config.local.toml", '[mcp]\nmax_searches = 10\nexclude_projects = ["P"]\n')
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.mcp_max_searches == 10
+    assert cfg.mcp_exclude_projects == ("P",)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", '"50"', "true", "2.5"])
+def test_badly_typed_max_searches_is_rejected(tmp_path: Path, value: str) -> None:
+    write_toml(tmp_path / "config.toml", f"[mcp]\nmax_searches = {value}\n")
+
+    with pytest.raises(ConfigError, match=r"\[mcp\]\.max_searches"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+def test_committed_config_caps_a_session_at_50_searches() -> None:
+    import tomllib
+
+    committed = Path(__file__).resolve().parents[1] / "config.toml"
+    raw = tomllib.loads(committed.read_text(encoding="utf-8"))
+
+    assert raw["mcp"]["max_searches"] == 50

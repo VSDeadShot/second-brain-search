@@ -12,6 +12,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "chromadb>=0.5",
     "google-genai>=1.0",
+    # Pinned exactly: 2.0 renamed FastMCP to MCPServer and broke the 1.x API.
+    "mcp==2.3.0",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +21,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 sbs = "second_brain.cli:main"
+sbs-mcp = "second_brain.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

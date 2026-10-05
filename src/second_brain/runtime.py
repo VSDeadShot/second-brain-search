@@ -35,6 +35,17 @@ def existing_chunk_count(index_dir: Path) -> int:
     return ChunkStore(index_dir).count()
 
 
+def require_exclusions(config: Config) -> tuple[str, ...]:
+    """The configured `[mcp] exclude_projects`, refusing when it is unset - which
+    means config.local.toml is missing or incomplete. Needs no index."""
+    if config.mcp_exclude_projects is None:
+        raise ConfigError(
+            "[mcp] exclude_projects is not set. Set it in config.local.toml to the "
+            "projects to hide, or to [] to hide none."
+        )
+    return config.mcp_exclude_projects
+
+
 def excluded_projects(config: Config, store: ChunkStore) -> tuple[str, ...]:
     """The projects the MCP server hides, spelled as the index spells them.
 
@@ -43,12 +54,7 @@ def excluded_projects(config: Config, store: ChunkStore) -> tuple[str, ...]:
     it meant to hide would be exposed. The message can reach the MCP client, so it
     names neither the entry nor any project: a typo sits one letter from a private name.
     """
-    names = config.mcp_exclude_projects
-    if names is None:
-        raise ConfigError(
-            "[mcp] exclude_projects is not set. Set it in config.local.toml to the "
-            "projects to hide, or to [] to hide none."
-        )
+    names = require_exclusions(config)
     indexed = {name.lower(): name for name in store.projects()}
     resolved: list[str] = []
     for position, name in enumerate(names, start=1):

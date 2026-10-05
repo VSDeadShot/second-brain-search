@@ -67,3 +67,7 @@ thin_message_chars = 200
 # the gitignored config.local.toml - the names themselves are private. It is left
 # unset here on purpose: unset, the server refuses every call, so a missing local
 # file can't expose anything. `exclude_projects = []` there hides nothing.
+
+# Searches one server process (one Claude session) may run. Each costs one
+# Gemini embedding against the free tier's daily 1000.
+max_searches = 50

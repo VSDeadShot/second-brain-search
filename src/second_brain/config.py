@@ -72,6 +72,12 @@ _GIT_FIELDS: dict[str, tuple[str, str]] = {
     "thin_message_chars": ("git_thin_message_chars", "positive int"),
 }
 
+# [mcp] key -> (Config field, expected kind).
+_MCP_FIELDS: dict[str, tuple[str, str]] = {
+    "exclude_projects": ("mcp_exclude_projects", "strings"),
+    "max_searches": ("mcp_max_searches", "positive int"),
+}
+
 
 @dataclass(frozen=True)
 class Config:
@@ -93,6 +99,8 @@ class Config:
     # Projects the MCP server hides. None (unset) is not () (hide nothing): the
     # server refuses to run on None, so a missing config.local.toml fails closed.
     mcp_exclude_projects: tuple[str, ...] | None = None
+    # Searches one MCP server process (one client session) may send to Gemini.
+    mcp_max_searches: int = 50
 
 
 def _repo_root() -> Path:
@@ -125,7 +133,7 @@ _EXPECTED = {
 }
 
 
-def _git_value(key: str, value: object, kind: str, filename: str) -> object:
+def _typed_value(table: str, key: str, value: object, kind: str, filename: str) -> object:
     if kind == "bool" and isinstance(value, bool):
         return value
     if kind == "strings" and _is_string_list(value):
@@ -134,7 +142,7 @@ def _git_value(key: str, value: object, kind: str, filename: str) -> object:
     is_int = isinstance(value, int) and not isinstance(value, bool)
     if kind == "positive int" and is_int and value > 0:  # type: ignore[operator]
         return value
-    raise ConfigError(f"{filename}: [git].{key} must be {_EXPECTED[kind]}")
+    raise ConfigError(f"{filename}: [{table}].{key} must be {_EXPECTED[kind]}")
 
 
 def _read_overrides(path: Path) -> dict[str, Any]:
@@ -155,12 +163,11 @@ def _read_overrides(path: Path) -> dict[str, Any]:
 
     for key, value in _table(raw, "git", _GIT_FIELDS, path.name).items():
         field_name, kind = _GIT_FIELDS[key]
-        values[field_name] = _git_value(key, value, kind, path.name)
+        values[field_name] = _typed_value("git", key, value, kind, path.name)
 
-    for key, value in _table(raw, "mcp", ("exclude_projects",), path.name).items():
-        if not _is_string_list(value):
-            raise ConfigError(f"{path.name}: [mcp].{key} must be a list of strings")
-        values["mcp_exclude_projects"] = tuple(value)
+    for key, value in _table(raw, "mcp", _MCP_FIELDS, path.name).items():
+        field_name, kind = _MCP_FIELDS[key]
+        values[field_name] = _typed_value("mcp", key, value, kind, path.name)
     return values
 
 
