@@ -29,7 +29,6 @@ from .embedding import (
     EMBEDDING_MODEL,
     Embedder,
     EmbeddingError,
-    GeminiEmbedder,
     estimate_embedding_seconds,
     gemini_cache_namespace,
     plan_batches,
@@ -44,22 +43,26 @@ from .retrieval import (
     RetrievedChunk,
     retrieve,
 )
+from .runtime import (
+    DEFAULT_INDEX_DIR,
+    REPO_ROOT,
+    EmbedderFactory,
+    existing_chunk_count,
+    gemini_embedder,
+)
 from .store import ChunkStore
 
 SNIPPET_CHARS = 240
 # How many of the closest passages a refusal shows, labelled as not an answer.
 REFUSAL_PASSAGES = 3
 
-# src/second_brain/cli.py -> repo root. Both gitignored.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INDEX_DIR = _REPO_ROOT / ".chroma"
-DEFAULT_CACHE_PATH = _REPO_ROOT / "data" / "embedding_cache.sqlite"
+# Gitignored, like the index (DEFAULT_INDEX_DIR, in runtime.py).
+DEFAULT_CACHE_PATH = REPO_ROOT / "data" / "embedding_cache.sqlite"
 # The suite is product data, not a test fixture: `sbs eval` reads it. Reports go
 # under data/, which is gitignored.
-DEFAULT_EVAL_SUITE = _REPO_ROOT / "eval" / "retrieval_v2.toml"
-DEFAULT_EVAL_OUT_DIR = _REPO_ROOT / "data" / "eval"
+DEFAULT_EVAL_SUITE = REPO_ROOT / "eval" / "retrieval_v2.toml"
+DEFAULT_EVAL_OUT_DIR = REPO_ROOT / "data" / "eval"
 
-EmbedderFactory = Callable[[Config], Embedder]
 GeneratorFactory = Callable[[Config], Generator]
 
 
@@ -100,10 +103,6 @@ def _load_config_or_fail(ctx: click.Context) -> Config:
         return load_config(Path(config_root) if config_root is not None else None)
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
-
-
-def _gemini_embedder(config: Config) -> Embedder:
-    return GeminiEmbedder(api_key=config.gemini_api_key)
 
 
 def _project_lines(report: IndexReport) -> list[str]:
@@ -175,14 +174,6 @@ def format_index_report(report: IndexReport, *, elapsed: float, index_dir: Path)
 
 def _format_duration(seconds: int) -> str:
     return "under a minute" if seconds < 60 else f"~{math.ceil(seconds / 60)} min"
-
-
-def _existing_chunk_count(index_dir: Path) -> int:
-    """Chunks already in the index - 0 when there is none. Never creates the directory,
-    and treats an empty collection (e.g. left by a failed first run) as no index."""
-    if not index_dir.exists():
-        return 0
-    return ChunkStore(index_dir).count()
 
 
 def _index_unchanged_note(existing_chunks: int) -> str:
@@ -293,7 +284,7 @@ def index(ctx: click.Context, dry_run: bool) -> None:
         collected = collect_chunks(config)
     except ConfigError as exc:
         # Refused before anything is embedded or written.
-        note = "" if dry_run else " " + _index_unchanged_note(_existing_chunk_count(index_dir))
+        note = "" if dry_run else " " + _index_unchanged_note(existing_chunk_count(index_dir))
         raise click.ClickException(f"{exc}{note}") from exc
     total = len(collected.chunks)
 
@@ -315,7 +306,7 @@ def index(ctx: click.Context, dry_run: bool) -> None:
 
     # Counted before anything opens the store for writing, so failure messages
     # describe the index as it was, not as a half-started run left it.
-    existing_chunks = _existing_chunk_count(index_dir)
+    existing_chunks = existing_chunk_count(index_dir)
 
     # A mistyped SBS_SCAN_ROOT pointing at an empty folder would otherwise
     # rebuild a good index into an empty one.
@@ -325,7 +316,7 @@ def index(ctx: click.Context, dry_run: bool) -> None:
             f"{_index_unchanged_note(existing_chunks)} Check SBS_SCAN_ROOT and config.toml."
         )
 
-    factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    factory: EmbedderFactory = ctx.obj.get("embedder_factory", gemini_embedder)
     embedder: Embedder | None = None
     cache: EmbeddingCache | None = None
     try:
@@ -396,10 +387,10 @@ def search(ctx: click.Context, query: str, k: int, project: str | None) -> None:
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
 
     # Checked before opening the store, which would otherwise create .chroma/.
-    if _existing_chunk_count(index_dir) == 0:
+    if existing_chunk_count(index_dir) == 0:
         raise click.ClickException("There is no index yet - run `sbs index` first.")
 
-    factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    factory: EmbedderFactory = ctx.obj.get("embedder_factory", gemini_embedder)
     try:
         results = retrieve(query, factory(config), ChunkStore(index_dir), k=k, project=project)
     except (RetrievalError, EmbeddingError) as exc:
@@ -439,7 +430,7 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
     reports_dir = Path(out_dir) if out_dir is not None else DEFAULT_EVAL_OUT_DIR
 
     # Checked before the store is opened, which would create .chroma/.
-    if _existing_chunk_count(index_dir) == 0:
+    if existing_chunk_count(index_dir) == 0:
         raise click.ClickException("There is no index yet - run `sbs index` first.")
 
     try:
@@ -450,7 +441,7 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
     click.echo(f"{suite.path.name}: {len(suite.questions)} questions")
     click.echo(f"This spends {len(suite.questions)} embedded texts of today's quota.\n")
 
-    factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    factory: EmbedderFactory = ctx.obj.get("embedder_factory", gemini_embedder)
     try:
         report = run_eval(suite, factory(config), ChunkStore(index_dir), k=k)
     except (RetrievalError, EmbeddingError) as exc:
@@ -554,10 +545,10 @@ def ask(ctx: click.Context, question: str, k: int, project: str | None, show_con
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
 
     # Checked before opening the store, which would otherwise create .chroma/.
-    if _existing_chunk_count(index_dir) == 0:
+    if existing_chunk_count(index_dir) == 0:
         raise click.ClickException("There is no index yet - run `sbs index` first.")
 
-    embedder_factory: EmbedderFactory = ctx.obj.get("embedder_factory", _gemini_embedder)
+    embedder_factory: EmbedderFactory = ctx.obj.get("embedder_factory", gemini_embedder)
     generator_factory: GeneratorFactory = ctx.obj.get("generator_factory", _gemini_generator)
 
     try:
