@@ -11,6 +11,7 @@ There is deliberately no score cut-off yet; results are always the top `k`.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .embedding import Embedder
@@ -57,8 +58,16 @@ class RetrievedChunk:
     """A commit's ISO author date - its citation date, instead of asking git about a path."""
 
 
-def _resolve_project(store: ChunkStore, project: str) -> str:
-    names = store.projects()
+def _resolve_excluded(store: ChunkStore, exclude_projects: Sequence[str]) -> tuple[str, ...]:
+    """The indexed spellings of the excluded names. Names not in the index are dropped -
+    checking them is the caller's job (runtime.excluded_projects)."""
+    wanted = {name.strip().lower() for name in exclude_projects}
+    return tuple(name for name in store.projects() if name.lower() in wanted)
+
+
+def _resolve_project(store: ChunkStore, project: str, excluded: Sequence[str] = ()) -> str:
+    # An excluded project reads exactly like one that isn't there, and is never listed.
+    names = [name for name in store.projects() if name not in excluded]
     for name in names:
         if name.lower() == project.strip().lower():
             return name
@@ -74,7 +83,10 @@ def retrieve(
     *,
     k: int = DEFAULT_K,
     project: str | None = None,
+    exclude_projects: Sequence[str] = (),
 ) -> list[RetrievedChunk]:
+    """Top-k chunks for `query`. `exclude_projects` (any case) are left out of the
+    search itself, and asking for one by `project` is refused as unknown."""
     if k < 1:
         raise ValueError("k must be at least 1")
     if not query.strip():
@@ -92,10 +104,15 @@ def retrieve(
             f"with {embedder.cache_namespace!r} - their vectors aren't comparable. "
             "Rebuild the index with `sbs index`."
         )
-    resolved_project = _resolve_project(store, project) if project is not None else None
+    excluded = _resolve_excluded(store, exclude_projects) if exclude_projects else ()
+    resolved_project = (
+        _resolve_project(store, project, excluded) if project is not None else None
+    )
 
     vector = embedder.embed_query(query)
-    rows = store.query(vector, k=k * _OVERFETCH, project=resolved_project)
+    rows = store.query(
+        vector, k=k * _OVERFETCH, project=resolved_project, exclude_projects=excluded
+    )
 
     results: list[RetrievedChunk] = []
     seen: set[str] = set()

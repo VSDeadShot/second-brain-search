@@ -445,3 +445,53 @@ def test_rows_from_an_index_built_before_commits_read_as_docs(tmp_path: Path) ->
     top = retrieve("redis caching ttl", embedder, store, k=1)[0]
 
     assert (top.source, top.commit, top.author, top.author_date) == ("doc", "", "", "")
+
+
+# --- excluded projects ------------------------------------------------------------
+
+
+def test_excluded_projects_are_never_returned(indexed) -> None:
+    store, embedder = indexed
+
+    # Macro Tracker is the best match for this query, so a leak would rank first.
+    results = retrieve("photo compression", embedder, store, k=10, exclude_projects=("Macro Tracker",))
+
+    assert {r.project for r in results} == {"RDBMS", "Watch Tracker"}
+
+
+def test_exclusion_matches_project_names_case_insensitively(indexed) -> None:
+    store, embedder = indexed
+
+    results = retrieve("photo compression", embedder, store, k=10, exclude_projects=("macro tracker",))
+
+    assert "Macro Tracker" not in {r.project for r in results}
+
+
+def test_asking_for_an_excluded_project_is_refused_as_unknown(indexed) -> None:
+    """Refused before embedding, and worded exactly as for a project that isn't there -
+    the list of valid names leaves the excluded one out."""
+    store, embedder = indexed
+
+    with pytest.raises(RetrievalError) as exc_info:
+        retrieve(
+            "photo compression",
+            embedder,
+            store,
+            project="macro tracker",
+            exclude_projects=("Macro Tracker",),
+        )
+
+    message = str(exc_info.value)
+    assert message.startswith("No project named 'macro tracker' in the index.")
+    assert "Macro Tracker" not in message
+    assert "RDBMS" in message and "Watch Tracker" in message
+    assert embedder.query_calls == []
+
+
+def test_an_unknown_project_message_does_not_list_excluded_names(indexed) -> None:
+    store, embedder = indexed
+
+    with pytest.raises(RetrievalError) as exc_info:
+        retrieve("caching", embedder, store, project="Nope", exclude_projects=("Macro Tracker",))
+
+    assert "Macro Tracker" not in str(exc_info.value)

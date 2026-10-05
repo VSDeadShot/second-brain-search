@@ -234,3 +234,63 @@ def test_committed_config_enables_git_with_no_author_values() -> None:
     assert table["enabled"] is True
     assert table["author_emails"] == []
     assert table["author_names"] == []
+
+
+# --- [mcp] - what the MCP server hides -------------------------------------------
+
+
+def test_exclude_projects_is_unset_when_no_file_sets_it(tmp_path: Path) -> None:
+    """Unset is not the same as empty: the server refuses to run on unset."""
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.mcp_exclude_projects is None
+
+
+def test_an_explicit_empty_exclude_list_is_kept_distinct_from_unset(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.local.toml", "[mcp]\nexclude_projects = []\n")
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.mcp_exclude_projects == ()
+
+
+def test_config_local_toml_supplies_the_excluded_projects(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.toml", "[mcp]\n")
+    write_toml(
+        tmp_path / "config.local.toml",
+        '[mcp]\nexclude_projects = ["Private One", "Private Two"]\n',
+    )
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.mcp_exclude_projects == ("Private One", "Private Two")
+
+
+def test_unknown_mcp_key_is_rejected(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.local.toml", '[mcp]\nexclude_project = ["Private One"]\n')
+
+    with pytest.raises(ConfigError, match="exclude_project"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "body",
+    ['exclude_projects = "Private One"', "exclude_projects = [1]", "exclude_projects = true"],
+)
+def test_badly_typed_mcp_values_are_rejected(tmp_path: Path, body: str) -> None:
+    write_toml(tmp_path / "config.local.toml", f"[mcp]\n{body}\n")
+
+    with pytest.raises(ConfigError, match=r"\[mcp\]"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+def test_committed_config_leaves_exclude_projects_unset() -> None:
+    """The real names belong only in the gitignored config.local.toml, and leaving the
+    key unset here is what makes a missing local file fail closed."""
+    import tomllib
+
+    committed = Path(__file__).resolve().parents[1] / "config.toml"
+    raw = tomllib.loads(committed.read_text(encoding="utf-8"))
+
+    assert "mcp" in raw
+    assert "exclude_projects" not in raw["mcp"]

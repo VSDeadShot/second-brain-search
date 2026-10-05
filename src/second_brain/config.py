@@ -90,6 +90,9 @@ class Config:
     git_author_names: tuple[str, ...] = ()
     git_diff_excerpt_chars: int = 800
     git_thin_message_chars: int = 200
+    # Projects the MCP server hides. None (unset) is not () (hide nothing): the
+    # server refuses to run on None, so a missing config.local.toml fails closed.
+    mcp_exclude_projects: tuple[str, ...] | None = None
 
 
 def _repo_root() -> Path:
@@ -153,6 +156,11 @@ def _read_overrides(path: Path) -> dict[str, Any]:
     for key, value in _table(raw, "git", _GIT_FIELDS, path.name).items():
         field_name, kind = _GIT_FIELDS[key]
         values[field_name] = _git_value(key, value, kind, path.name)
+
+    for key, value in _table(raw, "mcp", ("exclude_projects",), path.name).items():
+        if not _is_string_list(value):
+            raise ConfigError(f"{path.name}: [mcp].{key} must be a list of strings")
+        values["mcp_exclude_projects"] = tuple(value)
     return values
 
 

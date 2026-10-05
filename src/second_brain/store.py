@@ -91,15 +91,30 @@ class ChunkStore:
         )
 
     def query(
-        self, vector: Sequence[float], *, k: int, project: str | None = None
+        self,
+        vector: Sequence[float],
+        *,
+        k: int,
+        project: str | None = None,
+        exclude_projects: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
-        """Nearest chunks first: each row has id, text, distance and all metadata."""
+        """Nearest chunks first: each row has id, text, distance and all metadata.
+
+        Exclusion is part of the query, so the k nearest are drawn from what is left.
+        Names are matched exactly, as stored.
+        """
         if self.count() == 0:
             return []
+        filters: list[dict[str, Any]] = []
+        if project is not None:
+            filters.append({"project": project})
+        if exclude_projects:  # Chroma rejects an empty $nin
+            filters.append({"project": {"$nin": list(exclude_projects)}})
+        where = {"$and": filters} if len(filters) > 1 else (filters[0] if filters else None)
         result = self._collection.query(
             query_embeddings=[list(vector)],
             n_results=k,
-            where={"project": project} if project is not None else None,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         return [

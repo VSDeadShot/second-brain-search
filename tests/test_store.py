@@ -193,3 +193,44 @@ def test_projects_lists_every_indexed_project(tmp_path: Path, doc_factory) -> No
     store, _ = two_project_store(tmp_path, doc_factory)
 
     assert store.projects() == ["Alpha", "Beta"]
+
+
+# --- excluded projects ------------------------------------------------------------
+
+
+def three_projects(tmp_path: Path, doc_factory) -> ChunkStore:
+    store = ChunkStore(tmp_path / "chroma")
+    for project in ("Alpha", "Beta", "Gamma"):
+        store.upsert(*build(lambda: doc_factory(project=project)))
+    return store
+
+
+def test_query_leaves_out_excluded_projects(tmp_path: Path, doc_factory) -> None:
+    """Filtered inside the query, so k is filled from what is left."""
+    store = three_projects(tmp_path, doc_factory)
+    vector = FakeEmbedder().embed_query("anything")
+
+    rows = store.query(vector, k=10, exclude_projects=("Beta", "Gamma"))
+
+    assert rows
+    assert {r["project"] for r in rows} == {"Alpha"}
+
+
+def test_an_empty_exclusion_filters_nothing(tmp_path: Path, doc_factory) -> None:
+    store = three_projects(tmp_path, doc_factory)
+    vector = FakeEmbedder().embed_query("anything")
+
+    rows = store.query(vector, k=10, exclude_projects=())
+
+    assert {r["project"] for r in rows} == {"Alpha", "Beta", "Gamma"}
+
+
+def test_a_project_filter_and_an_exclusion_combine(tmp_path: Path, doc_factory) -> None:
+    store = three_projects(tmp_path, doc_factory)
+    vector = FakeEmbedder().embed_query("anything")
+
+    kept = store.query(vector, k=10, project="Alpha", exclude_projects=("Beta",))
+    emptied = store.query(vector, k=10, project="Beta", exclude_projects=("Beta",))
+
+    assert {r["project"] for r in kept} == {"Alpha"}
+    assert emptied == []
