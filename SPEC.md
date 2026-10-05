@@ -11,7 +11,7 @@ Vedansh has shipped 10+ projects (Watch Next, DSA Tracker, Interview Prep Flashc
 
 ## Non-goals (v1)
 - No web UI (CLI first; a Now Brief dashboard card is a plausible v2 extension, not v1 scope)
-- No code-level indexing (source files), only documentation/markdown — keeps scope tight and avoids license/noise issues from third-party code in dependencies
+- No indexing of source files — the only code indexed is the short, secret-filtered diff excerpt (max 800 chars) that slice 7 adds for commits with thin messages. Keeps scope tight and avoids license/noise issues from third-party code in dependencies.
 - No multi-user / auth — this is a single-user local tool
 
 ## Proposed stack (open for discussion, not locked)
@@ -35,3 +35,7 @@ Vedansh has shipped 10+ projects (Watch Next, DSA Tracker, Interview Prep Flashc
 4. Retrieval (given a query, return top-k relevant chunks)
 5. `ask` CLI command (retrieval + Gemini RAG answer with citations)
 6. Re-index command + basic incremental-update handling
+
+## Slices after v1
+7. Git history as a second source (index the owner's own commits alongside the docs, read from each repo's default branch: subject, body, changed paths, and for thin messages a short diff excerpt with secret-looking lines removed; cited as `Project / commit <hash>`)
+8. MCP server, search only (`sbs-mcp`, a local stdio server giving Claude Code / Claude Desktop read-only `list_projects` and `search`; private projects excluded via gitignored config; no generation server-side)

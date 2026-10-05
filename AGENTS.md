@@ -17,7 +17,7 @@ Rules for the coding agent (Claude Code) working on this project.
 - Python 3.11+, type hints on all function signatures
 - Config (repo paths, API keys) via a `.env` file — never hardcoded, never committed
 - Tests alongside features, not deferred to the end — each feature slice ships with at least basic coverage before being marked done
-- Keep the CLI the primary interface for v1 — no premature web/API layer
+- Keep the CLI the primary interface — no web UI or network API. One exception: `sbs-mcp`, a local stdio MCP server exposing read-only search over the same code paths the CLI uses (slice 8)
 
 ## Secrets and safety
 - Gemini API key read from environment only
