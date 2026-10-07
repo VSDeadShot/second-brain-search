@@ -63,7 +63,7 @@ def test_the_installed_sbs_mcp_serves_search_over_stdio(tmp_path: Path, search_c
 
     assert stray == [], "sbs-mcp wrote something other than protocol messages to stdout"
     assert {t.name for t in tools} == {"list_projects", "search"}
-    assert listed.structured_content == {"result": ["Alpha", "Beta"]}
+    assert listed.structured_content == {"projects": ["Alpha", "Beta"]}
     assert not searched.is_error, searched.content[0].text
     results = searched.structured_content["results"]
     assert results

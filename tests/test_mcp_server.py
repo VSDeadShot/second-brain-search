@@ -10,6 +10,7 @@ of them - and skips when the file is absent.
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from collections.abc import Sequence
@@ -189,9 +190,22 @@ def test_list_projects_never_lists_excluded_projects(search_corpus: Path, keywor
 
     result = call(make_server(search_corpus, index_dir, embedder), "list_projects")
 
-    assert result.structured_content == {"result": ["Alpha", "Beta"]}
+    assert result.structured_content == {"projects": ["Alpha", "Beta"]}
     assert "Hidden" not in result.content[0].text
     assert embedder.query_calls == []  # free: nothing is embedded
+
+
+def test_list_projects_is_one_text_block_naming_every_project(
+    search_corpus: Path, keyword_index
+) -> None:
+    # A list return is sent as one block per name, and Claude Desktop joins blocks with
+    # nothing between them: "AlphaBeta".
+    index_dir, embedder = keyword_index
+
+    result = call(make_server(search_corpus, index_dir, embedder), "list_projects")
+
+    assert len(result.content) == 1
+    assert json.loads(result.content[0].text) == {"projects": ["Alpha", "Beta"]}
 
 
 def test_list_projects_matches_exclusions_in_any_case(search_corpus: Path, keyword_index) -> None:
@@ -199,7 +213,7 @@ def test_list_projects_matches_exclusions_in_any_case(search_corpus: Path, keywo
 
     result = call(make_server(search_corpus, index_dir, embedder, exclude=("hidden",)), "list_projects")
 
-    assert result.structured_content == {"result": ["Alpha", "Beta"]}
+    assert result.structured_content == {"projects": ["Alpha", "Beta"]}
 
 
 # --- search -----------------------------------------------------------------------
@@ -411,7 +425,7 @@ def test_a_missing_api_key_is_a_config_error_and_list_projects_still_works(
 
     listed, searched = calls(server, [("list_projects", {}), ("search", {"query": "caching"})])
 
-    assert listed.structured_content == {"result": ["Alpha", "Beta"]}
+    assert listed.structured_content == {"projects": ["Alpha", "Beta"]}
     text = error_text(searched)
     assert "CONFIG:" in text and "GEMINI_API_KEY" in text
 

@@ -113,6 +113,12 @@ class SearchResults(BaseModel):
     results: list[Passage]
 
 
+class Projects(BaseModel):
+    # A model, not a bare list: a list is sent as one text block per name, and Claude
+    # Desktop joins blocks with nothing between them.
+    projects: list[str]
+
+
 class SessionCapReached(Exception):
     """This server process has sent its `[mcp] max_searches` queries to Gemini."""
 
@@ -232,13 +238,13 @@ def create_server(
         return ChunkStore(index_dir)
 
     @server.tool(description=LIST_PROJECTS_DESCRIPTION, annotations=READ_ONLY)
-    def list_projects() -> list[str]:
+    def list_projects() -> Projects:
         try:
             store = open_store()
             hidden = excluded_projects(config, store)
         except (ConfigError, RetrievalError) as exc:
             raise _tool_error(exc) from exc
-        return [name for name in store.projects() if name not in hidden]
+        return Projects(projects=[name for name in store.projects() if name not in hidden])
 
     @server.tool(
         description=SEARCH_DESCRIPTION.format(max_searches=config.mcp_max_searches),
