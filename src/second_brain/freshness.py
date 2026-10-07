@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .retrieval import RetrievedChunk
+
 GIT_TIMEOUT_SECONDS = 5.0
 DATE_FORMAT = "%Y-%m-%d"
 # Chroma stores mtimes as floats and filesystems round them differently, so a
@@ -115,3 +117,11 @@ class DateLookup:
             return path.stat().st_mtime
         except OSError:
             return None
+
+
+def chunk_date(chunk: RetrievedChunk, dates: DateLookup) -> FileDate:
+    """When a passage was written. A commit is dated by its own author date and never
+    changes; its `path` is the repo, which git would date by its latest commit."""
+    if chunk.source == "git":
+        return FileDate(chunk.author_date[:10] or "unknown", "committed")
+    return dates.date_for(chunk.path)

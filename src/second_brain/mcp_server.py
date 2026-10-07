@@ -50,7 +50,6 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import runtime
-from .answering import chunk_date
 from .config import Config, ConfigError, load_config
 from .embedding import (
     DailyQuotaExceeded,
@@ -59,7 +58,7 @@ from .embedding import (
     GeminiEmbedder,
     UnexplainedRateLimit,
 )
-from .freshness import DateLookup
+from .freshness import DateLookup, chunk_date
 from .gemini_errors import rate_limit_delay
 from .retrieval import DEFAULT_K, RetrievalError, RetrievedChunk, retrieve
 from .runtime import EmbedderFactory, excluded_projects, existing_chunk_count, require_exclusions

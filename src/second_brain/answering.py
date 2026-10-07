@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .embedding import Embedder
-from .freshness import DateLookup, FileDate
+from .freshness import DateLookup, chunk_date
 from .generation import Generator, RawAnswer
 from .retrieval import DEFAULT_ANSWER_K, RetrievedChunk, retrieve_for_answer
 from .store import ChunkStore
@@ -66,14 +66,6 @@ def _refusal(
         warnings=warnings,
         model=model,
     )
-
-
-def chunk_date(chunk: RetrievedChunk, dates: DateLookup) -> FileDate:
-    """When a passage was written. A commit is dated by its own author date and never
-    changes; its `path` is the repo, which git would date by its latest commit."""
-    if chunk.source == "git":
-        return FileDate(chunk.author_date[:10] or "unknown", "committed")
-    return dates.date_for(chunk.path)
 
 
 def _resolve_citations(
