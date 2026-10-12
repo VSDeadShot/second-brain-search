@@ -44,6 +44,12 @@ exclude_paths = [
     "Second Brain/CLAUDE_SUMMARY.md",
 ]
 
+# Projects never indexed: their docs and git history are skipped, so none of their
+# text reaches Gemini. Set exclude_projects ONLY in the gitignored config.local.toml -
+# the names are private. It is left unset here on purpose: unset, `sbs index` refuses
+# to run, so a missing local file can't index a private project.
+# `exclude_projects = []` there indexes every project.
+
 [git]
 # Index each repo's commit history alongside its docs. A repo with a remote is
 # read at the remote's default branch as last fetched (origin/HEAD); a repo with

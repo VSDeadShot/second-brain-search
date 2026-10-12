@@ -72,8 +72,10 @@ flowchart LR
 ```
 
 1. **Discovery** scans one parent folder (`SBS_SCAN_ROOT`) for target doc files and skips
-   dependency and build directories. Git history is read from each repo's default branch as last
-   fetched, or from local `HEAD` when the repo has no remote. Indexing never fetches.
+   dependency and build directories. Projects listed in `[discovery] exclude_projects` are
+   dropped here, so their docs and git history are never read. Git history is read from each
+   repo's default branch as last fetched, or from local `HEAD` when the repo has no remote.
+   Indexing never fetches.
 2. **Chunking** splits each doc at its headings, then caps each chunk at 1,500 characters with a
    150-character overlap. Chunks under 50 characters are dropped. The heading path is prefixed
    to the embedded text, so a chunk deep inside a section still carries that section's topic.
@@ -113,6 +115,12 @@ Settings are applied in this order, each overriding the last: code defaults, `co
 Personal values belong in `config.local.toml`:
 
 ```toml
+[discovery]
+# Projects never indexed: their docs and git history are skipped, so none of their
+# text is sent to Gemini. [] indexes every project; if this key is unset,
+# `sbs index` refuses to run.
+exclude_projects = ["Some Private Repo"]
+
 [git]
 # Only commits by these authors are indexed. With [git] enabled and both lists
 # empty, `sbs index` refuses to run.
@@ -120,10 +128,13 @@ author_emails = ["you@example.com"]
 author_names = ["Your Name"]
 
 [mcp]
-# Projects the MCP server hides. [] hides nothing; if this key is unset,
-# sbs-mcp refuses to start.
-exclude_projects = ["<private-project>"]
+# Projects the MCP server hides - list the private projects here too. [] hides
+# nothing; if this key is unset, sbs-mcp refuses to start.
+exclude_projects = ["Some Private Repo"]
 ```
+
+An entry that matches no project folder is refused rather than ignored, since a typo would
+index the project it meant to skip. The refusal gives the entry's position, never its text.
 
 ## Commands
 
@@ -143,6 +154,28 @@ sbs eval                         # writes data/eval/retrieval-v2-<timestamp>.jso
 
 Cost per command: `search` uses 1 embedding, `ask` uses 1 embedding plus 1 generation, and
 `eval` uses 1 embedding per question.
+
+### New projects
+
+Exclusion is opt-out, so `sbs index` refuses a project that the last rebuild didn't index.
+A new private repo is never indexed before you've decided about it (line breaks added):
+
+```text
+> sbs index
+Error: 1 new project since the last rebuild: Some New Repo. Index it with --accept-new NAME
+(once per project), or add private ones to [discovery] exclude_projects in config.local.toml.
+Nothing was written - the existing index (N chunks) is unchanged.
+```
+
+- To index it, name it: `sbs index --accept-new "Some New Repo"`. Repeat the flag once per new
+  project. Names match in any case, and they must match the new projects exactly.
+- If it's private, add it to `[discovery] exclude_projects` instead.
+- `sbs index --dry-run` lists the new projects and says whether the real run would proceed,
+  without refusing.
+- `--accept-all-new` is for the first rebuild only. An index built before this check (or no
+  index at all) has no recorded project list, so every project counts as new. Any later
+  rebuild refuses the flag.
+- A refusal never prints an excluded name, or an `--accept-new` value that isn't a new project.
 
 ### MCP server (`sbs-mcp`)
 
@@ -213,8 +246,15 @@ not whether a generated answer is correct.
 
 - **Gemini's free tier.** Gemini's free-tier inputs may be used to improve Google's products and
   read by human reviewers; see the [Gemini API terms](https://ai.google.dev/gemini-api/terms).
-  Projects listed in `[mcp] exclude_projects` are hidden from the MCP server, but `sbs index`
-  still embeds them and `sbs ask` can send their passages for generation.
+  Projects listed in `[discovery] exclude_projects` are never indexed, so none of their text is
+  embedded, stored, or sent for generation. Text sent before a project was excluded can't be
+  recalled. `[mcp] exclude_projects` also hides projects from the MCP server, including from an
+  index built before they were excluded.
+- **Exclusion is by project, not by mention.** A public project's docs or commits that mention a
+  private one are still indexed.
+- **A renamed folder counts as a new project.** Project names are folder names, so after a rename
+  `sbs index` refuses until the new name is accepted with `--accept-new`. The old name drops out
+  of the index.
 - **Mid-word cuts.** The overlap between split chunks can start a passage mid-word.
 - **Near-empty chunks.** A chunk such as a section that is only `npm install` can take a
   retrieval slot.
