@@ -603,3 +603,28 @@ def test_report_results_carry_the_chunk_index(tmp_path: Path, indexed_knowledge)
 
     for result in questions[0]["results"]:
         assert isinstance(result["chunk_index"], int)
+
+
+def test_the_committed_suite_names_no_excluded_project() -> None:
+    """The suite is public; the exclude lists in the gitignored config.local.toml name
+    private projects. No line of the suite - field, note or comment - may contain one."""
+    import tomllib
+
+    local = REPO_ROOT / "config.local.toml"
+    if not local.is_file():
+        pytest.skip("config.local.toml is absent (e.g. a fresh clone): no private names to check")
+    raw = tomllib.loads(local.read_text(encoding="utf-8"))
+    names = {
+        name.strip().lower()
+        for table in ("discovery", "mcp")
+        for name in raw.get(table, {}).get("exclude_projects", [])
+        if name.strip()
+    }
+    if not names:
+        pytest.skip("config.local.toml excludes no project: no private names to check")
+
+    lines = COMMITTED_SUITE.read_text(encoding="utf-8").lower().splitlines()
+
+    # Reported by line number, so a failure doesn't print the private name either.
+    named = [n for n, line in enumerate(lines, start=1) if any(name in line for name in names)]
+    assert named == [], f"lines {named} of the committed eval suite name an excluded project"

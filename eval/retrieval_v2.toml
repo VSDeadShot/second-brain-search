@@ -131,7 +131,6 @@ id = "q6-rate-limiting"
 category = "cross-project"
 text = "Where have I used rate limiting?"
 expected_projects = ["Interview Flashcards", "Watch Tracker"]
-also_in_corpus = ["Shweta's Website"]
 notes = "Watch Tracker rate-limits its own outgoing requests (EXPLAINER.md:505)."
 
 [[question]]
@@ -155,7 +154,6 @@ category = "trap"
 text = "How do I stop someone hammering my sign-in endpoint?"
 expected_projects = ["Interview Flashcards"]
 expected_text = ["LoginRateLimit", "Rate-limit sign-in attempts"]
-also_in_corpus = ["Shweta's Website"]
 notes = """
 Phrased with no keywords shared with the docs on purpose. The answer is LoginRateLimit
 (CLAUDE.md:126-128) and docs/api-contract.md:211-212 (429 + Retry-After, rolling 15 minutes).
