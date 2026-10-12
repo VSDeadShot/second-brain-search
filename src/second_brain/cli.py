@@ -291,6 +291,15 @@ def index(ctx: click.Context, dry_run: bool) -> None:
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
     cache_path = Path(ctx.obj.get("cache_path", DEFAULT_CACHE_PATH))
 
+    # Unset is not [] (index everything): a missing config.local.toml, or one without
+    # the key, must not quietly index a private project. Refused before the scan.
+    if config.discovery_exclude_projects is None:
+        note = "" if dry_run else " " + _index_unchanged_note(existing_chunk_count(index_dir))
+        raise click.ClickException(
+            "[discovery] exclude_projects is not set. Set it in config.local.toml to the "
+            f"projects never to index, or to [] to index every project.{note}"
+        )
+
     click.echo(f"Scanning {config.scan_root}")
     try:
         collected = collect_chunks(config)

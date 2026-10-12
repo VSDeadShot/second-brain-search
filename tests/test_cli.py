@@ -75,11 +75,13 @@ def run(
     api_key="fake-key",
     config_root: Path | None = None,
 ):
-    # config.toml / config.local.toml / .env are read from here - by default an
-    # empty folder, so no test sees the repo's real config or the owner's authors.
+    # config.toml / config.local.toml / .env are read from here - by default a folder
+    # holding only `[discovery] exclude_projects = []` (index every project), so no test
+    # sees the repo's real config or the owner's authors.
     if config_root is None:
         config_root = index_dir.parent / "config-root"
-        config_root.mkdir(parents=True, exist_ok=True)
+        if not config_root.exists():
+            make_file(config_root / "config.local.toml", "[discovery]\nexclude_projects = []\n")
     obj: dict = {
         "index_dir": index_dir,
         "cache_path": cache_path_for(index_dir),
@@ -1078,14 +1080,17 @@ def test_the_cli_reads_config_from_the_injected_root(tmp_path: Path, tree: Path)
 
 
 def git_config_root(tmp_path: Path, *, authors: bool = True) -> Path:
-    """config.toml as committed (enabled, empty lists) plus a local file with authors."""
+    """config.toml as committed (enabled, empty lists) plus a local file that excludes no
+    project and, unless `authors=False`, names the owner."""
     root = tmp_path / "cfg"
     make_file(
         root / "config.toml",
         "[git]\nenabled = true\nauthor_emails = []\nauthor_names = []\n",
     )
+    local = "[discovery]\nexclude_projects = []\n"
     if authors:
-        make_file(root / "config.local.toml", f'[git]\nauthor_emails = ["{ME[1]}"]\n')
+        local += f'\n[git]\nauthor_emails = ["{ME[1]}"]\n'
+    make_file(root / "config.local.toml", local)
     return root
 
 
@@ -1319,3 +1324,70 @@ def test_an_unknown_exclusion_is_refused_without_naming_it(
     assert "entry 1 of 1" in result.output
     assert "Privat" not in result.output
     assert "Traceback" not in result.output
+
+
+# --- [discovery] exclude_projects must be set before indexing (fail closed) ----------
+
+
+@pytest.mark.parametrize("args", [["index"], ["index", "--dry-run"]])
+@pytest.mark.parametrize("local_file", [True, False], ids=["key-missing", "file-missing"])
+def test_index_refuses_while_index_time_exclusions_are_unset(
+    tmp_path: Path, corpus: Path, args: list[str], local_file: bool
+) -> None:
+    """Unset is not [] (index everything): a config.local.toml without the key - or no
+    such file at all - must not quietly index a private project."""
+    index_dir = tmp_path / "chroma"
+    run(["index"], scan_root=corpus, index_dir=index_dir, factory=fake_factory)
+    before = ChunkStore(index_dir).count()
+    config_root = tmp_path / "cfg-unset"
+    config_root.mkdir()
+    if local_file:
+        make_file(config_root / "config.local.toml", "[mcp]\nexclude_projects = []\n")
+
+    result = run(
+        args,
+        scan_root=corpus,
+        index_dir=index_dir,
+        factory=must_not_embed,
+        config_root=config_root,
+    )
+
+    assert result.exit_code != 0
+    assert "[discovery] exclude_projects is not set" in result.output
+    assert "config.local.toml" in result.output and "[]" in result.output
+    assert "Traceback" not in result.output
+    assert ChunkStore(index_dir).count() == before
+
+
+def test_an_empty_index_time_exclusion_list_indexes_every_project(tmp_path: Path, corpus: Path) -> None:
+    config_root = tmp_path / "cfg-empty"
+    make_file(config_root / "config.local.toml", "[discovery]\nexclude_projects = []\n")
+
+    result = run(
+        ["index"],
+        scan_root=corpus,
+        index_dir=tmp_path / "chroma",
+        factory=fake_factory,
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ChunkStore(tmp_path / "chroma").projects() == ["Alpha", "Beta"]
+
+
+def test_discover_still_lists_every_project_while_exclusions_are_unset(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """Only indexing sends text anywhere; listing local files stays available."""
+    config_root = tmp_path / "cfg-unset"
+    config_root.mkdir()
+
+    result = run(
+        ["discover", "--json"],
+        scan_root=corpus,
+        index_dir=tmp_path / "chroma",
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert {d["project"] for d in json.loads(result.output)} == {"Alpha", "Beta"}
