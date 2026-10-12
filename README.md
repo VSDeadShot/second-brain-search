@@ -230,13 +230,9 @@ not whether a generated answer is correct.
 ## Tests
 
 ```powershell
-pytest
+pytest            # offline: makes no Gemini call, in any shell
+pytest --live     # also runs the live Gemini test (needs GEMINI_API_KEY; costs 1 embedding)
 ```
 
-560 tests: 559 offline with fakes + 1 opt-in live Gemini test (runs only when `GEMINI_API_KEY`
-is set; costs 1 embedding). The live test checks the environment variable only, not `.env`. To
-skip it, run with the key unset:
-
-```powershell
-$env:GEMINI_API_KEY = ""; pytest
-```
+The offline tests use fakes, so a plain `pytest` makes no Gemini call, whether or not a key is
+set. One live Gemini test, marked `live`, runs only with `--live`.

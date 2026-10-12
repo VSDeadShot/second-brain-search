@@ -582,9 +582,10 @@ def test_a_named_per_minute_quota_without_a_delay_still_waits() -> None:
     assert clock.sleeps == [RATE_WINDOW_SECONDS + RATE_LIMIT_MARGIN_SECONDS]
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not os.environ.get("GEMINI_API_KEY"),
-    reason="live Gemini call; set GEMINI_API_KEY to run",
+    reason="needs GEMINI_API_KEY, in .env or the environment",
 )
 def test_live_gemini_embedding_roundtrip() -> None:
     """Opt-in: the only test that proves the real client and model name work."""

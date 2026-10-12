@@ -7,12 +7,35 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-# The project's documented config source is .env, so opt-in tests gated on
-# GEMINI_API_KEY must see a key set there - not only a shell export. Runs at
-# import time, before any skipif in a test module is evaluated. override=False
-# keeps a real environment variable authoritative. Safe for hermeticity: every
-# load_config() call in the suite passes an explicit env mapping.
+# The project's documented config source is .env, so a live test run with --live
+# must see a key set there - not only a shell export. Runs at import time, before
+# any skipif in a test module is evaluated. override=False keeps a real
+# environment variable authoritative. Safe for hermeticity: every load_config()
+# call in the suite passes an explicit env mapping.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
+
+# --- live tests: real Gemini calls, only with --live -------------------------------
+# The key alone can't be the switch: .env supplies it to every run, and in
+# PowerShell `$env:GEMINI_API_KEY = ""` deletes the variable, so .env refills it.
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help="Also run tests marked live. They call Gemini and spend free-tier quota.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--live"):
+        return
+    skip = pytest.mark.skip(reason="live Gemini call - run pytest with --live to include it")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip)
 
 
 def make_file(path: Path, content: str = "x") -> Path:

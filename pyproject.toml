@@ -28,3 +28,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: calls the real Gemini API and spends free-tier quota; skipped unless pytest is run with --live",
+]
