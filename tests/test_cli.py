@@ -1195,3 +1195,127 @@ def test_a_commit_citation_names_the_commit_and_its_date() -> None:
         "[1] DSA Tracker / commit b237453 > security: fix submitReview by verifying "
         "problem ownership  (committed 2026-07-02)"
     ) in out
+
+
+# --- [discovery] exclude_projects: never indexed, never embedded ---------------------
+
+CANARY = "CANARY-7Q3X"
+
+
+def hidden_corpus(tmp_path: Path) -> tuple[Path, Path]:
+    """Alpha, plus a git repo "Hidden" whose doc AND commit carry CANARY, and a config
+    that turns git on and excludes Hidden at index time."""
+    from conftest import commit, init_repo
+
+    root = tmp_path / "root"
+    alpha = init_repo(root / "Alpha")
+    commit(
+        alpha,
+        "docs: describe Alpha\n\nAlpha's README says what it tracks, at enough length to be indexed.",
+        {"README.md": "# Alpha\n\nAlpha tracks practice problems, described at realistic length.\n"},
+    )
+    hidden = init_repo(root / "Hidden")
+    commit(
+        hidden,
+        f"feat: {CANARY} private plan\n\nThe {CANARY} commit body describes private work at length.",
+        {"README.md": f"# Hidden\n\nPrivate notes: {CANARY} appears in this document on purpose.\n"},
+    )
+    config_root = tmp_path / "cfg"
+    make_file(config_root / "config.toml", "[git]\nenabled = true\n")
+    make_file(
+        config_root / "config.local.toml",
+        f'[git]\nauthor_emails = ["{ME[1]}"]\n\n[discovery]\nexclude_projects = ["hidden"]\n',
+    )
+    return root, config_root
+
+
+def test_an_excluded_project_never_reaches_the_embedder(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    root, config_root = hidden_corpus(tmp_path)
+    index_dir = tmp_path / "chroma"
+    embedder = FakeEmbedder()
+
+    result = run(
+        ["index"],
+        scan_root=root,
+        index_dir=index_dir,
+        factory=lambda config: embedder,
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    sent = [text for call in embedder.embed_calls for text in call]
+    assert sent, "the public project must still be embedded"
+    assert [text for text in sent if CANARY in text] == []
+    store = ChunkStore(index_dir)
+    assert store.projects() == ["Alpha"]
+    assert {m["source"] for m in store.all_metadata()} == {"doc", "git"}
+    assert len(sent) == store.count()  # a cold cache: every stored chunk embedded once
+    assert "Hidden" not in result.output
+
+    # Nothing was cached for Hidden either: build its chunks with the exclusion lifted.
+    lifted = replace(
+        load_config(project_root=config_root, env={"SBS_SCAN_ROOT": str(root)}),
+        discovery_exclude_projects=(),
+    )
+    hidden_keys = [
+        cache_key(embedder.cache_namespace, c.content_hash)
+        for c in collect_chunks(lifted).chunks
+        if c.project == "Hidden"
+    ]
+    assert len(hidden_keys) == 2  # its doc and its commit
+    assert EmbeddingCache(cache_path_for(index_dir)).get_many(hidden_keys) == {}
+
+
+def test_dry_run_counts_excluded_projects_without_naming_them(tmp_path: Path) -> None:
+    root, config_root = hidden_corpus(tmp_path)
+
+    result = run(
+        ["index", "--dry-run"],
+        scan_root=root,
+        index_dir=tmp_path / "chroma",
+        factory=must_not_embed,
+        api_key="",
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Excluded at index time: 1 project ([discovery] exclude_projects)" in result.output
+    assert "Hidden" not in result.output
+    assert CANARY not in result.output
+
+
+def test_discover_leaves_out_excluded_projects(tmp_path: Path) -> None:
+    root, config_root = hidden_corpus(tmp_path)
+
+    result = run(
+        ["discover", "--json"],
+        scan_root=root,
+        index_dir=tmp_path / "chroma",
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert {d["project"] for d in json.loads(result.output)} == {"Alpha"}
+
+
+@pytest.mark.parametrize("args", [["discover"], ["index"], ["index", "--dry-run"]])
+def test_an_unknown_exclusion_is_refused_without_naming_it(
+    tmp_path: Path, corpus: Path, args: list[str]
+) -> None:
+    config_root = tmp_path / "cfg"
+    make_file(config_root / "config.local.toml", '[discovery]\nexclude_projects = ["Privat Projekt"]\n')
+
+    result = run(
+        args,
+        scan_root=corpus,
+        index_dir=tmp_path / "chroma",
+        factory=must_not_embed,
+        config_root=config_root,
+    )
+
+    assert result.exit_code != 0
+    assert "entry 1 of 1" in result.output
+    assert "Privat" not in result.output
+    assert "Traceback" not in result.output

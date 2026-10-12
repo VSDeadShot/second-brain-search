@@ -327,3 +327,53 @@ def test_committed_config_caps_a_session_at_50_searches() -> None:
     raw = tomllib.loads(committed.read_text(encoding="utf-8"))
 
     assert raw["mcp"]["max_searches"] == 50
+
+
+# --- [discovery] exclude_projects - projects never indexed -------------------------
+
+
+def test_index_time_exclusions_are_unset_when_no_file_sets_them(tmp_path: Path) -> None:
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.discovery_exclude_projects is None
+
+
+def test_an_empty_index_time_exclusion_list_is_kept_distinct_from_unset(tmp_path: Path) -> None:
+    write_toml(tmp_path / "config.local.toml", "[discovery]\nexclude_projects = []\n")
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.discovery_exclude_projects == ()
+
+
+def test_config_local_toml_supplies_the_projects_never_indexed(tmp_path: Path) -> None:
+    write_toml(
+        tmp_path / "config.local.toml",
+        '[discovery]\nexclude_projects = ["Private One", "Private Two"]\n',
+    )
+
+    cfg = load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+    assert cfg.discovery_exclude_projects == ("Private One", "Private Two")
+    assert cfg.mcp_exclude_projects is None  # the two lists are independent
+
+
+@pytest.mark.parametrize(
+    "body",
+    ['exclude_projects = "Private One"', "exclude_projects = [1]", "exclude_projects = true"],
+)
+def test_badly_typed_index_time_exclusions_are_rejected(tmp_path: Path, body: str) -> None:
+    write_toml(tmp_path / "config.local.toml", f"[discovery]\n{body}\n")
+
+    with pytest.raises(ConfigError, match=r"\[discovery\]\.exclude_projects must be a list of strings"):
+        load_config(project_root=tmp_path, env=_scan(tmp_path))
+
+
+def test_committed_config_leaves_index_time_exclusions_unset() -> None:
+    """The names are private, so they belong only in the gitignored config.local.toml."""
+    import tomllib
+
+    committed = Path(__file__).resolve().parents[1] / "config.toml"
+    raw = tomllib.loads(committed.read_text(encoding="utf-8"))
+
+    assert "exclude_projects" not in raw["discovery"]

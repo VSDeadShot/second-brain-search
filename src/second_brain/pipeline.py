@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .chunking import DEFAULT_MAX_CHARS, DEFAULT_OVERLAP, Chunk, chunk_document
 from .config import Config, ConfigError
-from .discovery import DiscoveredDoc, discover_documents
+from .discovery import DiscoveredDoc, discover_documents, discovery_excluded_projects
 from .embedding import BatchCallback, Embedder, EmbeddingError
 from .embedding_cache import EmbeddingCache, cache_key
 from .git_history import GitError, RepoHistory, RepoStatus, collect_repo_history, repo_status
@@ -59,6 +59,8 @@ class IndexReport:
     reused: int = 0
     git_repos: list[GitRepoReport] = field(default_factory=list)
     git_chunks: int = 0
+    # How many projects [discovery] exclude_projects kept out - a count, never names.
+    excluded_projects: int = 0
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,14 @@ def collect_chunks(
     scan runs here.
     """
     require_git_authors(config)
-    documents = list(docs) if docs is not None else discover_documents(config)
+    # Filtered again here: `docs` can be supplied, which skips discovery's own filter.
+    # Git history follows the documents, so an excluded repo is never read either.
+    skip = discovery_excluded_projects(config)
+    documents = [
+        doc
+        for doc in (docs if docs is not None else discover_documents(config))
+        if doc.project.lower() not in skip
+    ]
 
     chunks: list[Chunk] = []
     skipped: list[tuple[str, str]] = []
@@ -195,6 +204,10 @@ def collect_chunks(
             git_chunk_count += len(history.chunks)
             git_repos.append(_repo_report(project, status, history))
 
+    # The last point before anything could be embedded.
+    if any(chunk.project.lower() in skip for chunk in chunks):
+        raise RuntimeError("A chunk from an excluded project reached indexing.")
+
     report = IndexReport(
         documents=read_count,
         chunks=len(chunks),
@@ -203,6 +216,7 @@ def collect_chunks(
         chunks_per_project=dict(Counter(c.project for c in chunks)),
         git_repos=git_repos,
         git_chunks=git_chunk_count,
+        excluded_projects=len(skip),
     )
     return ChunkCollection(chunks=chunks, report=report)
 

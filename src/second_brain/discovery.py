@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config
+from .config import Config, ConfigError
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,27 @@ def _nearest_git_root(start: Path, scan_root: Path, cache: dict[Path, Path | Non
     for directory in chain:
         cache[directory] = found
     return found
+
+
+def discovery_excluded_projects(config: Config) -> frozenset[str]:
+    """`[discovery] exclude_projects`, case-folded - the projects never indexed."""
+    return frozenset(name.strip().lower() for name in config.discovery_exclude_projects or ())
+
+
+def _check_exclusions(config: Config, projects: set[str]) -> None:
+    """Refuse an entry that matches no discovered project: a typo would index the very
+    project it meant to skip. The entry itself is never echoed - a typo sits one letter
+    from a private name, and this message can end up pasted anywhere."""
+    names = config.discovery_exclude_projects or ()
+    present = {project.lower() for project in projects}
+    for position, name in enumerate(names, start=1):
+        if name.strip().lower() not in present:
+            raise ConfigError(
+                f"[discovery] exclude_projects entry {position} of {len(names)} "
+                "(config.local.toml) matches no discovered project, so the project it "
+                "means to skip would be indexed. Check its spelling against the project "
+                "folder names under SBS_SCAN_ROOT."
+            )
 
 
 def discover_documents(config: Config) -> list[DiscoveredDoc]:
@@ -117,4 +138,8 @@ def discover_documents(config: Config) -> list[DiscoveredDoc]:
                 mtime=stat.st_mtime,
             )
 
-    return sorted(found.values(), key=lambda d: (d.project.lower(), d.rel_path.lower()))
+    # Checked against every project found, before any is dropped.
+    _check_exclusions(config, {doc.project for doc in found.values()})
+    skip = discovery_excluded_projects(config)
+    kept = [doc for doc in found.values() if doc.project.lower() not in skip]
+    return sorted(kept, key=lambda d: (d.project.lower(), d.rel_path.lower()))

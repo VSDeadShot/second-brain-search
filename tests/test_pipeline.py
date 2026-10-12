@@ -569,3 +569,17 @@ def test_git_chunks_are_stored_with_their_metadata(tmp_path: Path, git_corpus: P
     assert stored
     assert all(m["commit"] and m["author_email"] == ME[1] for m in stored)
     assert all(m["rel_path"].startswith("commit ") for m in stored)
+
+
+# --- exclude_projects ----------------------------------------------------------------
+
+
+def test_supplied_docs_of_an_excluded_project_are_still_dropped(corpus: Path) -> None:
+    """`docs=` skips discovery, so collect_chunks applies the exclusion again itself."""
+    docs = discover_documents(config_for(corpus))
+    config = replace(config_for(corpus), discovery_exclude_projects=("ALPHA",))
+
+    collected = collect_chunks(config, docs=docs)
+
+    assert {c.project for c in collected.chunks} == {"Beta"}
+    assert collected.report.projects == 1

@@ -99,6 +99,10 @@ class Config:
     # Projects the MCP server hides. None (unset) is not () (hide nothing): the
     # server refuses to run on None, so a missing config.local.toml fails closed.
     mcp_exclude_projects: tuple[str, ...] | None = None
+    # Projects never indexed: their docs are skipped at discovery, so their history is
+    # never read and none of their text is sent to Gemini. Set only in the gitignored
+    # config.local.toml - the names are private. None means unset; () skips nothing.
+    discovery_exclude_projects: tuple[str, ...] | None = None
     # Searches one MCP server process (one client session) may send to Gemini.
     mcp_max_searches: int = 50
 
@@ -156,10 +160,12 @@ def _read_overrides(path: Path) -> dict[str, Any]:
         raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
 
     values: dict[str, Any] = {}
-    for key, value in _table(raw, "discovery", _LIST_FIELDS, path.name).items():
+    discovery_keys = (*_LIST_FIELDS, "exclude_projects")
+    for key, value in _table(raw, "discovery", discovery_keys, path.name).items():
         if not _is_string_list(value):
             raise ConfigError(f"{path.name}: [discovery].{key} must be a list of strings")
-        values[key] = tuple(value)
+        field_name = "discovery_exclude_projects" if key == "exclude_projects" else key
+        values[field_name] = tuple(value)
 
     for key, value in _table(raw, "git", _GIT_FIELDS, path.name).items():
         field_name, kind = _GIT_FIELDS[key]

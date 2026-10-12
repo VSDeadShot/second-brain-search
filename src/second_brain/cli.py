@@ -193,6 +193,14 @@ def _embedding_header(plan: EmbeddingPlan, total: int) -> str:
     return f"Embedding {plan.to_embed} texts from {total} chunks..."
 
 
+def _excluded_lines(report: IndexReport) -> list[str]:
+    # A count only: the names are private, and this output gets pasted around.
+    n = report.excluded_projects
+    if not n:
+        return []
+    return [f"Excluded at index time: {n} project{'' if n == 1 else 's'} ([discovery] exclude_projects)", ""]
+
+
 def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
     requests = len(plan_batches(plan.pending))
     seconds = estimate_embedding_seconds(plan.pending)
@@ -209,6 +217,7 @@ def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
         "",
         *_project_lines(report),
         "",
+        *_excluded_lines(report),
         *_git_lines(report),
         *_skipped_lines(report),
         *saved,
@@ -235,7 +244,10 @@ def cli(ctx: click.Context) -> None:
 def discover(ctx: click.Context, as_json: bool) -> None:
     """List the documentation files that would be indexed."""
     config = _load_config_or_fail(ctx)
-    docs = discover_documents(config)
+    try:
+        docs = discover_documents(config)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if as_json:
         click.echo(json.dumps([_as_dict(d) for d in docs], indent=2))

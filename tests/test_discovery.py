@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from second_brain.config import Config, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
+from second_brain.config import Config, ConfigError, DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS
 from second_brain.discovery import discover_documents
 
 from conftest import make_file, make_git_dir
@@ -166,3 +166,35 @@ def test_excluding_a_file_leaves_its_siblings_alone(tmp_path: Path) -> None:
     docs = discover_documents(config_for(root, exclude_paths=("Proj/docs/drop.md",)))
 
     assert {d.path.name for d in docs} == {"keep.md"}
+
+
+# --- exclude_projects: projects never indexed ---------------------------------------
+
+
+def test_excluded_projects_are_left_out_whatever_the_case(tree: Path) -> None:
+    every = discover_documents(config_for(tree))
+    kept = discover_documents(config_for(tree, discovery_exclude_projects=(" alpha ",)))
+
+    assert "Alpha" in {d.project for d in every}
+    assert kept == [d for d in every if d.project != "Alpha"]
+
+
+@pytest.mark.parametrize("exclude", [None, ()])
+def test_unset_or_empty_exclusions_leave_out_nothing(tree: Path, exclude) -> None:
+    assert discover_documents(config_for(tree, discovery_exclude_projects=exclude)) == (
+        discover_documents(config_for(tree))
+    )
+
+
+def test_an_exclusion_matching_no_project_is_refused_without_naming_it(tree: Path) -> None:
+    """A typo would index the project it meant to skip. The entry is not echoed: a typo
+    sits one letter from a private name, and terminal output gets pasted around."""
+    config = config_for(tree, discovery_exclude_projects=("Alpha", "Privat Projekt"))
+
+    with pytest.raises(ConfigError) as caught:
+        discover_documents(config)
+
+    message = str(caught.value)
+    assert "entry 2 of 2" in message
+    assert "config.local.toml" in message
+    assert "Privat" not in message
