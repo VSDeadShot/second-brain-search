@@ -34,7 +34,16 @@ from .embedding import (
     plan_batches,
 )
 from .embedding_cache import EmbeddingCache
-from .pipeline import EmbeddingPlan, IndexReport, collect_chunks, embedding_plan, store_chunks
+from .pipeline import (
+    EmbeddingPlan,
+    IndexReport,
+    NewProjects,
+    acceptance_problem,
+    collect_chunks,
+    embedding_plan,
+    new_projects,
+    store_chunks,
+)
 from .evaluation import EvalSuiteError, load_eval_suite, report_to_dict, run_eval
 from .retrieval import (
     DEFAULT_ANSWER_K,
@@ -50,7 +59,7 @@ from .runtime import (
     existing_chunk_count,
     gemini_embedder,
 )
-from .store import ChunkStore
+from .store import ChunkStore, ProjectRecord
 
 SNIPPET_CHARS = 240
 # How many of the closest passages a refusal shows, labelled as not an answer.
@@ -201,7 +210,9 @@ def _excluded_lines(report: IndexReport) -> list[str]:
     return [f"Excluded at index time: {n} project{'' if n == 1 else 's'} ([discovery] exclude_projects)", ""]
 
 
-def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
+def _format_dry_run(
+    report: IndexReport, plan: EmbeddingPlan, guard: Sequence[str] = ()
+) -> str:
     requests = len(plan_batches(plan.pending))
     seconds = estimate_embedding_seconds(plan.pending)
     saved = (
@@ -218,6 +229,7 @@ def _format_dry_run(report: IndexReport, plan: EmbeddingPlan) -> str:
         *_project_lines(report),
         "",
         *_excluded_lines(report),
+        *guard,
         *_git_lines(report),
         *_skipped_lines(report),
         *saved,
@@ -277,15 +289,55 @@ def discover(ctx: click.Context, as_json: bool) -> None:
     )
 
 
+def _record_of(index_dir: Path) -> ProjectRecord | None:
+    # Checked first so that reading the record never creates an empty index.
+    return ChunkStore(index_dir).project_record if existing_chunk_count(index_dir) else None
+
+
+def _guard_lines(found: NewProjects, problem: str | None) -> list[str]:
+    if found.bootstrap:
+        lines = [
+            "No recorded project set (the index predates the new-project guard, or there is "
+            f"none): all {len(found.names)} projects count as new."
+        ]
+    elif found.names:
+        n = len(found.names)
+        lines = [f"New since the last rebuild: {n} project{'' if n == 1 else 's'}: {', '.join(found.names)}"]
+    else:
+        lines = ["New since the last rebuild: none"]
+    lines.append(
+        "The real run would proceed." if problem is None else f"The real run would refuse: {problem}"
+    )
+    return [*lines, ""]
+
+
 @cli.command()
 @click.option(
     "--dry-run",
     is_flag=True,
     help="Discover and chunk, then report what would be embedded. No API key, no writes.",
 )
+@click.option(
+    "--accept-new",
+    "accept_new",
+    multiple=True,
+    metavar="NAME",
+    help="Index a project that is new since the last rebuild. Repeat once per new project.",
+)
+@click.option(
+    "--accept-all-new",
+    is_flag=True,
+    help="First guarded rebuild only (no recorded project set): accept every project.",
+)
 @click.pass_context
-def index(ctx: click.Context, dry_run: bool) -> None:
-    """Rebuild the search index from scratch."""
+def index(
+    ctx: click.Context, dry_run: bool, accept_new: tuple[str, ...], accept_all_new: bool
+) -> None:
+    """Rebuild the search index from scratch.
+
+    A project the last rebuild did not index is refused until it is named with
+    --accept-new, so a new private project is never indexed by surprise.
+    """
     started = time.perf_counter()
     config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
@@ -322,7 +374,11 @@ def index(ctx: click.Context, dry_run: bool) -> None:
             gemini_cache_namespace(EMBEDDING_MODEL, DEFAULT_DIMENSIONS),
             EmbeddingCache.open_existing(cache_path),
         )
-        click.echo(_format_dry_run(collected.report, plan))
+        # Reports the guard's verdict without enforcing it, so new projects can be
+        # seen before deciding.
+        found = new_projects(collected.projects, _record_of(index_dir))
+        problem = acceptance_problem(found, accept_new, accept_all_new)
+        click.echo(_format_dry_run(collected.report, plan, _guard_lines(found, problem)))
         return
 
     # Counted before anything opens the store for writing, so failure messages
@@ -336,6 +392,12 @@ def index(ctx: click.Context, dry_run: bool) -> None:
             f"Nothing to index under {config.scan_root} - no chunks were produced. "
             f"{_index_unchanged_note(existing_chunks)} Check SBS_SCAN_ROOT and config.toml."
         )
+
+    # The new-project guard: refused before any embedder is built.
+    found = new_projects(collected.projects, _record_of(index_dir))
+    problem = acceptance_problem(found, accept_new, accept_all_new)
+    if problem is not None:
+        raise click.ClickException(f"{problem} {_index_unchanged_note(existing_chunks)}")
 
     factory: EmbedderFactory = ctx.obj.get("embedder_factory", gemini_embedder)
     embedder: Embedder | None = None

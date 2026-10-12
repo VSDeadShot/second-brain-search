@@ -36,14 +36,24 @@ class ProjectRecord:
 
     excluded: tuple[str, ...] = ()
     """`[discovery] exclude_projects` as this rebuild applied it - left out on purpose."""
+    indexed: tuple[str, ...] | None = None
+    """The projects this rebuild indexed - what the new-project guard compares against.
+    None for a record written before the guard existed."""
 
     def to_json(self) -> str:
-        return json.dumps({"excluded": list(self.excluded)})
+        data: dict[str, list[str]] = {"excluded": list(self.excluded)}
+        if self.indexed is not None:
+            data["indexed"] = list(self.indexed)
+        return json.dumps(data)
 
     @classmethod
     def from_json(cls, raw: str) -> ProjectRecord:
         data = json.loads(raw)
-        return cls(excluded=tuple(data.get("excluded", ())))
+        indexed = data.get("indexed")
+        return cls(
+            excluded=tuple(data.get("excluded", ())),
+            indexed=tuple(indexed) if indexed is not None else None,
+        )
 
 
 class VectorSpaceMismatch(Exception):

@@ -79,6 +79,8 @@ class ChunkCollection:
     report: IndexReport
     excluded: tuple[str, ...] = ()
     """`[discovery] exclude_projects` as applied - recorded in the index on a rebuild."""
+    projects: tuple[str, ...] = ()
+    """Every project this run read docs or history from - recorded on a rebuild."""
 
 
 def _keys(chunks: Sequence[Chunk], namespace: str) -> list[str]:
@@ -221,7 +223,74 @@ def collect_chunks(
         excluded_projects=len(skip),
     )
     excluded = tuple(name.strip() for name in config.discovery_exclude_projects or ())
-    return ChunkCollection(chunks=chunks, report=report, excluded=excluded)
+    return ChunkCollection(
+        chunks=chunks,
+        report=report,
+        excluded=excluded,
+        projects=tuple(sorted(projects, key=str.lower)),
+    )
+
+
+@dataclass(frozen=True)
+class NewProjects:
+    """Projects this run would index that the last rebuild did not."""
+
+    bootstrap: bool
+    """True when the index recorded no project set (no index, or one built before the
+    guard): every project counts as new."""
+    names: tuple[str, ...]
+
+
+def new_projects(projects: Sequence[str], record: ProjectRecord | None) -> NewProjects:
+    """Compared ignoring case. A project that has disappeared since is not new."""
+    if record is None or record.indexed is None:
+        return NewProjects(bootstrap=True, names=tuple(sorted(projects, key=str.lower)))
+    known = {name.lower() for name in record.indexed}
+    fresh = [name for name in projects if name.lower() not in known]
+    return NewProjects(bootstrap=False, names=tuple(sorted(fresh, key=str.lower)))
+
+
+def acceptance_problem(
+    found: NewProjects, accept_new: Sequence[str], accept_all_new: bool
+) -> str | None:
+    """Why a rebuild must not go ahead, or None.
+
+    New projects are named - they are never on the exclude list. An --accept-new value
+    that is not new is refused by position and never echoed: it may be an excluded name,
+    or a typo one letter from one.
+    """
+    if accept_new and accept_all_new:
+        return "Use either --accept-new NAME or --accept-all-new, not both."
+    if accept_all_new:
+        if found.bootstrap:
+            return None
+        return (
+            "--accept-all-new is only for the first guarded rebuild, when the index has "
+            "recorded no project set. Name each new project with --accept-new NAME."
+        )
+    new = {name.lower(): name for name in found.names}
+    given = [value.strip().lower() for value in accept_new]
+    for position, value in enumerate(given, start=1):
+        if value not in new:
+            return f"--accept-new value {position} of {len(given)} is not a new project."
+    unnamed = [name for key, name in new.items() if key not in given]
+    if not unnamed:
+        return None
+    if found.bootstrap:
+        return (
+            "No recorded project set (the index predates the new-project guard, or there "
+            "is none): the first guarded rebuild needs --accept-all-new. It would index "
+            f"{len(unnamed)} projects: {', '.join(unnamed)}."
+        )
+    one = len(unnamed) == 1
+    count = f"{len(unnamed)} new project{'' if one else 's'} since the last rebuild"
+    if given:  # some were named, so say which new ones were not
+        count += f" {'is' if one else 'are'} not named with --accept-new"
+    return (
+        f"{count}: {', '.join(unnamed)}. Index "
+        f"{'it' if len(unnamed) == 1 else 'them'} with --accept-new NAME (once per "
+        "project), or add private ones to [discovery] exclude_projects in config.local.toml."
+    )
 
 
 def store_chunks(
@@ -287,7 +356,10 @@ def store_chunks(
     if rebuild:
         # The MCP server reads this back: a project it hides that the index left out on
         # purpose is not a typo.
-        store.reset(namespace=namespace, project_record=ProjectRecord(excluded=collected.excluded))
+        # Written only here, with every vector already in hand: a run that fails or
+        # is stopped by the quota never reaches it, and the old record stands.
+        record = ProjectRecord(excluded=collected.excluded, indexed=collected.projects)
+        store.reset(namespace=namespace, project_record=record)
     elif store.namespace is None:
         store.record_namespace(namespace)
     store.upsert(chunks, vectors)

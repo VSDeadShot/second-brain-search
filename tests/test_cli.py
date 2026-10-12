@@ -41,6 +41,7 @@ from second_brain.embedding import (
 )
 from second_brain.embedding_cache import EmbeddingCache, cache_key
 from second_brain.pipeline import IndexReport, collect_chunks
+from second_brain.runtime import existing_chunk_count
 from second_brain.store import ChunkStore
 
 from conftest import ME, make_file, make_git_chunk, make_git_dir
@@ -74,6 +75,7 @@ def run(
     generator=None,
     api_key="fake-key",
     config_root: Path | None = None,
+    bootstrap_accept: bool = True,
 ):
     # config.toml / config.local.toml / .env are read from here - by default a folder
     # holding only `[discovery] exclude_projects = []` (index every project), so no test
@@ -82,6 +84,16 @@ def run(
         config_root = index_dir.parent / "config-root"
         if not config_root.exists():
             make_file(config_root / "config.local.toml", "[discovery]\nexclude_projects = []\n")
+    # A real `index` into an empty index is a first guarded rebuild. Tests about other
+    # behaviour accept it; the guard's own tests pass bootstrap_accept=False.
+    if (
+        bootstrap_accept
+        and args[:1] == ["index"]
+        and "--dry-run" not in args
+        and not any(a.startswith("--accept") for a in args)
+        and existing_chunk_count(index_dir) == 0
+    ):
+        args = [*args, "--accept-all-new"]
     obj: dict = {
         "index_dir": index_dir,
         "cache_path": cache_path_for(index_dir),
@@ -1391,3 +1403,243 @@ def test_discover_still_lists_every_project_while_exclusions_are_unset(
 
     assert result.exit_code == 0, result.output
     assert {d["project"] for d in json.loads(result.output)} == {"Alpha", "Beta"}
+
+
+# --- new-project guard: an unlisted project is never indexed by surprise ----------------
+
+PRIVATE = "Zq9Private"  # an excluded project; its name must never be printed
+
+
+def guard_corpus(tmp_path: Path) -> tuple[Path, Path]:
+    """Alpha and Beta, plus PRIVATE, which the config excludes at index time."""
+    root = tmp_path / "root"
+    for name in ("Alpha", "Beta", PRIVATE):
+        add_project(root, name)
+    config_root = tmp_path / "cfg"
+    make_file(config_root / "config.local.toml", f'[discovery]\nexclude_projects = ["{PRIVATE.lower()}"]\n')
+    return root, config_root
+
+
+def add_project(root: Path, name: str) -> None:
+    make_file(
+        make_git_dir(root / name) / "README.md",
+        f"# {name}\n\n{name} is described here at a realistic length, enough for the size floor.",
+    )
+
+
+def guarded_index(tmp_path: Path, root: Path, config_root: Path, *args: str, factory=fake_factory):
+    return run(
+        ["index", *args],
+        scan_root=root,
+        index_dir=tmp_path / "chroma",
+        factory=factory,
+        config_root=config_root,
+        bootstrap_accept=False,
+    )
+
+
+def bootstrapped(tmp_path: Path) -> tuple[Path, Path]:
+    root, config_root = guard_corpus(tmp_path)
+    result = guarded_index(tmp_path, root, config_root, "--accept-all-new")
+    assert result.exit_code == 0, result.output
+    return root, config_root
+
+
+def recorded_projects(tmp_path: Path) -> list[str]:
+    return [name.lower() for name in ChunkStore(tmp_path / "chroma").project_record.indexed]
+
+
+def assert_never_named_private(output: str) -> None:
+    assert PRIVATE.lower() not in output.lower()
+
+
+def test_the_first_guarded_rebuild_refuses_without_accept_all_new(tmp_path: Path) -> None:
+    root, config_root = guard_corpus(tmp_path)
+
+    result = guarded_index(tmp_path, root, config_root, factory=must_not_embed)
+
+    assert result.exit_code != 0
+    assert "first guarded rebuild" in result.output and "--accept-all-new" in result.output
+    assert "Alpha" in result.output and "Beta" in result.output
+    assert_never_named_private(result.output)
+    assert "Traceback" not in result.output
+    assert not (tmp_path / "chroma").exists()
+
+
+def test_accept_all_new_bootstraps_and_records_the_indexed_projects(tmp_path: Path) -> None:
+    bootstrapped(tmp_path)
+
+    assert ChunkStore(tmp_path / "chroma").projects() == ["Alpha", "Beta"]
+    assert recorded_projects(tmp_path) == ["alpha", "beta"]
+
+
+def test_a_rerun_with_the_same_projects_needs_no_flag(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+
+    result = guarded_index(tmp_path, root, config_root)
+
+    assert result.exit_code == 0, result.output
+
+
+def test_a_new_project_is_refused_and_named(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    before = ChunkStore(tmp_path / "chroma").count()
+    add_project(root, "Gamma")
+
+    result = guarded_index(tmp_path, root, config_root, factory=must_not_embed)
+
+    assert result.exit_code != 0
+    assert "1 new project since the last rebuild: Gamma" in result.output
+    assert "--accept-new" in result.output
+    assert "Alpha" not in result.output
+    assert_never_named_private(result.output)
+    assert ChunkStore(tmp_path / "chroma").count() == before
+
+
+def test_naming_the_new_project_proceeds_in_any_case(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    result = guarded_index(tmp_path, root, config_root, "--accept-new", "gAMMA")
+
+    assert result.exit_code == 0, result.output
+    assert recorded_projects(tmp_path) == ["alpha", "beta", "gamma"]
+
+
+def test_a_new_project_left_unnamed_is_refused_and_named(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+    add_project(root, "Delta")
+
+    result = guarded_index(tmp_path, root, config_root, "--accept-new", "Gamma", factory=must_not_embed)
+
+    assert result.exit_code != 0
+    assert "1 new project since the last rebuild is not named with --accept-new: Delta" in result.output
+
+
+def test_a_named_project_that_is_not_new_is_refused_without_echoing_it(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    result = guarded_index(
+        tmp_path, root, config_root, "--accept-new", "Gamma", "--accept-new", "Alpha",
+        factory=must_not_embed,
+    )
+
+    assert result.exit_code != 0
+    assert "--accept-new value 2 of 2 is not a new project" in result.output
+    assert "Alpha" not in result.output
+
+
+def test_an_excluded_name_given_to_accept_new_is_never_echoed(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    result = guarded_index(
+        tmp_path, root, config_root, "--accept-new", "Gamma", "--accept-new", PRIVATE,
+        factory=must_not_embed,
+    )
+
+    assert result.exit_code != 0
+    assert "--accept-new value 2 of 2 is not a new project" in result.output
+    assert_never_named_private(result.output)
+
+
+def test_accept_all_new_is_refused_outside_the_first_guarded_rebuild(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    result = guarded_index(tmp_path, root, config_root, "--accept-all-new", factory=must_not_embed)
+
+    assert result.exit_code != 0
+    assert "only for the first guarded rebuild" in result.output
+    assert "Gamma" not in result.output
+
+
+def test_both_accept_flags_together_are_refused(tmp_path: Path) -> None:
+    root, config_root = guard_corpus(tmp_path)
+
+    result = guarded_index(
+        tmp_path, root, config_root, "--accept-all-new", "--accept-new", "Alpha",
+        factory=must_not_embed,
+    )
+
+    assert result.exit_code != 0
+    assert "not both" in result.output
+
+
+def test_an_index_with_no_recorded_projects_counts_as_the_first_guarded_rebuild(
+    tmp_path: Path,
+) -> None:
+    """An index built before the guard (no project record) must not silently pass."""
+    from dataclasses import replace
+
+    from second_brain.pipeline import store_chunks
+
+    root, config_root = guard_corpus(tmp_path)
+    config = replace(
+        load_config(project_root=config_root, env={"SBS_SCAN_ROOT": str(root)}),
+    )
+    legacy = ChunkStore(tmp_path / "chroma")
+    store_chunks(collect_chunks(config), FakeEmbedder(), legacy, rebuild=False)
+    assert legacy.project_record is None
+
+    refused = guarded_index(tmp_path, root, config_root, factory=must_not_embed)
+    accepted = guarded_index(tmp_path, root, config_root, "--accept-all-new")
+
+    assert refused.exit_code != 0 and "first guarded rebuild" in refused.output
+    assert accepted.exit_code == 0, accepted.output
+
+
+def test_dry_run_reports_new_projects_and_what_the_flags_would_do(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    plain = guarded_index(tmp_path, root, config_root, "--dry-run", factory=must_not_embed)
+    named = guarded_index(
+        tmp_path, root, config_root, "--dry-run", "--accept-new", "Gamma", factory=must_not_embed
+    )
+
+    assert plain.exit_code == 0, plain.output
+    assert "New since the last rebuild: 1 project: Gamma" in plain.output
+    assert "The real run would refuse" in plain.output
+    assert named.exit_code == 0, named.output
+    assert "The real run would proceed" in named.output
+    assert_never_named_private(plain.output + named.output)
+
+
+def test_dry_run_on_the_first_guarded_rebuild_says_so(tmp_path: Path) -> None:
+    root, config_root = guard_corpus(tmp_path)
+
+    result = guarded_index(tmp_path, root, config_root, "--dry-run", factory=must_not_embed)
+
+    assert result.exit_code == 0, result.output
+    assert "No recorded project set" in result.output
+    assert not (tmp_path / "chroma").exists()
+
+
+def test_a_removed_project_needs_no_flag_and_leaves_the_record(tmp_path: Path) -> None:
+    import shutil
+
+    root, config_root = bootstrapped(tmp_path)
+    shutil.rmtree(root / "Beta")
+
+    result = guarded_index(tmp_path, root, config_root)
+
+    assert result.exit_code == 0, result.output
+    assert recorded_projects(tmp_path) == ["alpha"]
+
+
+def test_discover_is_unaffected_by_the_guard(tmp_path: Path) -> None:
+    root, config_root = bootstrapped(tmp_path)
+    add_project(root, "Gamma")
+
+    result = run(
+        ["discover", "--json"],
+        scan_root=root,
+        index_dir=tmp_path / "chroma",
+        config_root=config_root,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Gamma" in {d["project"] for d in json.loads(result.output)}

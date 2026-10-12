@@ -604,3 +604,12 @@ def test_a_rebuild_that_excludes_nothing_records_an_empty_list(tmp_path: Path, c
 
     assert store.project_record is not None
     assert store.project_record.excluded == ()
+
+
+def test_a_rebuild_records_the_projects_it_indexed(tmp_path: Path, corpus: Path) -> None:
+    config = replace(config_for(corpus), discovery_exclude_projects=("beta",))
+    store = ChunkStore(tmp_path / "chroma")
+
+    store_chunks(collect_chunks(config), FakeEmbedder(), store, rebuild=True)
+
+    assert store.project_record.indexed == ("Alpha",)

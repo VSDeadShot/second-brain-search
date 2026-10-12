@@ -270,3 +270,20 @@ def test_recording_projects_keeps_cosine_distance(tmp_path: Path, doc_factory) -
     store.reset(namespace="ns", project_record=ProjectRecord(excluded=("Hidden",)))
 
     assert _cosine_distance_check(store, doc_factory) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_the_project_record_keeps_the_indexed_projects(tmp_path: Path) -> None:
+    path = tmp_path / "chroma"
+    record = ProjectRecord(excluded=("Hidden",), indexed=("Alpha", "Beta"))
+    ChunkStore(path).reset(namespace="ns", project_record=record)
+
+    assert ChunkStore(path).project_record == record
+
+
+def test_a_record_without_indexed_projects_reads_back_as_none(tmp_path: Path) -> None:
+    """A record written before the guard has no "indexed" field: None, not (), so the
+    guard treats that index as never having recorded its projects."""
+    path = tmp_path / "chroma"
+    ChunkStore(path).reset(namespace="ns", project_record=ProjectRecord(excluded=("Hidden",)))
+
+    assert ChunkStore(path).project_record.indexed is None
