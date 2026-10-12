@@ -160,3 +160,52 @@ def test_a_misspelled_excluded_project_is_refused_without_naming_anything(
     assert "entry 2 of 2" in message
     for name in ("Macro Trackr", "Macro Tracker", "RDBMS", "Watch Tracker"):
         assert name not in message
+
+
+# --- excluded at index time: the index's record satisfies [mcp] ----------------------
+
+
+def store_excluding(tmp_path: Path, knowledge: Path, exclude: tuple[str, ...] | None) -> ChunkStore:
+    config = replace(config_for(knowledge, api_key=None), discovery_exclude_projects=exclude)
+    store = ChunkStore(tmp_path / "chroma")
+    store_chunks(collect_chunks(config), KeywordEmbedder(), store, rebuild=True)
+    return store
+
+
+def test_a_project_the_index_recorded_as_excluded_is_accepted(tmp_path: Path, knowledge: Path) -> None:
+    """After a rebuild that left RDBMS out, [mcp] still names it: that is not a typo, the
+    index says it skipped it - so the server keeps working instead of refusing every call."""
+    store = store_excluding(tmp_path, knowledge, ("rdbms",))
+    config = replace(config_for(tmp_path, api_key=None), mcp_exclude_projects=("RDBMS",))
+
+    assert "RDBMS" not in store.projects()
+    assert excluded_projects(config, store) == ()  # nothing left in the index to hide
+
+
+def test_a_typo_is_refused_even_when_the_index_recorded_exclusions(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    store = store_excluding(tmp_path, knowledge, ("rdbms",))
+    config = replace(config_for(tmp_path, api_key=None), mcp_exclude_projects=("RDBM",))
+
+    with pytest.raises(ConfigError) as exc_info:
+        excluded_projects(config, store)
+
+    assert "entry 1 of 1" in str(exc_info.value)
+    assert "RDBM" not in str(exc_info.value)
+
+
+def test_an_index_built_before_the_exclusion_still_hides_the_project(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    """The config now excludes RDBMS at index time, but this index predates that and still
+    holds it: [mcp] must keep hiding it until the next rebuild."""
+    store = store_excluding(tmp_path, knowledge, ())
+    config = replace(
+        config_for(tmp_path, api_key=None),
+        discovery_exclude_projects=("RDBMS",),
+        mcp_exclude_projects=("rdbms",),
+    )
+
+    assert "RDBMS" in store.projects()
+    assert excluded_projects(config, store) == ("RDBMS",)

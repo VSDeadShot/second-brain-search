@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from second_brain.chunking import chunk_document
-from second_brain.store import ChunkStore
+from second_brain.store import ChunkStore, ProjectRecord
 
 from fakes import FakeEmbedder
 
@@ -234,3 +234,39 @@ def test_a_project_filter_and_an_exclusion_combine(tmp_path: Path, doc_factory) 
 
     assert {r["project"] for r in kept} == {"Alpha"}
     assert emptied == []
+
+
+# --- project record: what a rebuild recorded about projects ----------------------------
+
+
+def test_a_new_store_has_no_recorded_projects(tmp_path: Path) -> None:
+    """None, not an empty record: an index built before projects were recorded."""
+    assert ChunkStore(tmp_path / "chroma").project_record is None
+
+
+def test_a_rebuild_records_the_excluded_projects_and_keeps_the_vector_space(tmp_path: Path) -> None:
+    path = tmp_path / "chroma"
+    ChunkStore(path).reset(namespace="ns", project_record=ProjectRecord(excluded=("Hidden",)))
+
+    reopened = ChunkStore(path)
+    assert reopened.project_record == ProjectRecord(excluded=("Hidden",))
+    assert reopened.namespace == "ns"
+
+
+def test_the_project_record_is_one_json_object_that_can_grow(tmp_path: Path) -> None:
+    """One metadata key holding a JSON object: a later field (the indexed projects) joins
+    the object instead of needing a second metadata format."""
+    import json
+
+    store = ChunkStore(tmp_path / "chroma")
+    store.reset(namespace="ns", project_record=ProjectRecord(excluded=("Hidden",)))
+
+    raw = store._collection.metadata["project_record"]
+    assert json.loads(raw) == {"excluded": ["Hidden"]}
+
+
+def test_recording_projects_keeps_cosine_distance(tmp_path: Path, doc_factory) -> None:
+    store = ChunkStore(tmp_path / "chroma")
+    store.reset(namespace="ns", project_record=ProjectRecord(excluded=("Hidden",)))
+
+    assert _cosine_distance_check(store, doc_factory) == pytest.approx(0.0, abs=1e-6)

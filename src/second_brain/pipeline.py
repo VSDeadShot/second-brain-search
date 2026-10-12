@@ -25,7 +25,7 @@ from .discovery import DiscoveredDoc, discover_documents, discovery_excluded_pro
 from .embedding import BatchCallback, Embedder, EmbeddingError
 from .embedding_cache import EmbeddingCache, cache_key
 from .git_history import GitError, RepoHistory, RepoStatus, collect_repo_history, repo_status
-from .store import ChunkStore, VectorSpaceMismatch
+from .store import ChunkStore, ProjectRecord, VectorSpaceMismatch
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,8 @@ class EmbeddingPlan:
 class ChunkCollection:
     chunks: list[Chunk]
     report: IndexReport
+    excluded: tuple[str, ...] = ()
+    """`[discovery] exclude_projects` as applied - recorded in the index on a rebuild."""
 
 
 def _keys(chunks: Sequence[Chunk], namespace: str) -> list[str]:
@@ -218,7 +220,8 @@ def collect_chunks(
         git_chunks=git_chunk_count,
         excluded_projects=len(skip),
     )
-    return ChunkCollection(chunks=chunks, report=report)
+    excluded = tuple(name.strip() for name in config.discovery_exclude_projects or ())
+    return ChunkCollection(chunks=chunks, report=report, excluded=excluded)
 
 
 def store_chunks(
@@ -282,7 +285,9 @@ def store_chunks(
     vectors = [known[key] for key in keys]
 
     if rebuild:
-        store.reset(namespace=namespace)
+        # The MCP server reads this back: a project it hides that the index left out on
+        # purpose is not a typo.
+        store.reset(namespace=namespace, project_record=ProjectRecord(excluded=collected.excluded))
     elif store.namespace is None:
         store.record_namespace(namespace)
     store.upsert(chunks, vectors)

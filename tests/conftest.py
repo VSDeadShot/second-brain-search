@@ -336,8 +336,9 @@ def search_corpus(tmp_path: Path) -> Path:
     return root
 
 
-def index_corpus(corpus: Path, index_dir: Path, embedder) -> "ChunkStore":
-    """Index `corpus` the way `sbs index` does, recording `embedder`'s vector space."""
+def index_corpus(corpus: Path, index_dir: Path, embedder, *, exclude=None) -> "ChunkStore":
+    """Index `corpus` the way `sbs index` does, recording `embedder`'s vector space.
+    `exclude` is `[discovery] exclude_projects` - projects left out at index time."""
     from second_brain.config import DEFAULT_EXCLUDE_DIRS, DEFAULT_INCLUDE_PATTERNS, Config
     from second_brain.pipeline import collect_chunks, store_chunks
     from second_brain.store import ChunkStore
@@ -349,6 +350,7 @@ def index_corpus(corpus: Path, index_dir: Path, embedder) -> "ChunkStore":
         include_dirs=("docs",),
         exclude_dirs=DEFAULT_EXCLUDE_DIRS,
         exclude_paths=(),
+        discovery_exclude_projects=exclude,
     )
     store = ChunkStore(index_dir)
     store_chunks(collect_chunks(config), embedder, store, rebuild=True)

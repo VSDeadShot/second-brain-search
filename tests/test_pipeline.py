@@ -583,3 +583,24 @@ def test_supplied_docs_of_an_excluded_project_are_still_dropped(corpus: Path) ->
 
     assert {c.project for c in collected.chunks} == {"Beta"}
     assert collected.report.projects == 1
+
+
+def test_a_rebuild_records_the_projects_it_excluded(tmp_path: Path, corpus: Path) -> None:
+    config = replace(config_for(corpus), discovery_exclude_projects=("beta",))
+    store = ChunkStore(tmp_path / "chroma")
+
+    store_chunks(collect_chunks(config), FakeEmbedder(), store, rebuild=True)
+
+    assert store.projects() == ["Alpha"]
+    assert [name.lower() for name in store.project_record.excluded] == ["beta"]
+
+
+def test_a_rebuild_that_excludes_nothing_records_an_empty_list(tmp_path: Path, corpus: Path) -> None:
+    """Recorded as (), not left unset: "excluded nothing" differs from "never recorded"."""
+    config = replace(config_for(corpus), discovery_exclude_projects=())
+    store = ChunkStore(tmp_path / "chroma")
+
+    store_chunks(collect_chunks(config), FakeEmbedder(), store, rebuild=True)
+
+    assert store.project_record is not None
+    assert store.project_record.excluded == ()

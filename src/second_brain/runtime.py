@@ -51,14 +51,22 @@ def excluded_projects(config: Config, store: ChunkStore) -> tuple[str, ...]:
 
     Fails closed. Unset means config.local.toml is missing or incomplete, and an
     entry matching no indexed project is most likely a typo - either way the project
-    it meant to hide would be exposed. The message can reach the MCP client, so it
-    names neither the entry nor any project: a typo sits one letter from a private name.
+    it meant to hide would be exposed. The one exception is a project the index
+    recorded leaving out at index time ([discovery] exclude_projects): it is absent on
+    purpose, and there is nothing of it to hide. The message can reach the MCP client,
+    so it names neither the entry nor any project: a typo sits one letter from a
+    private name.
     """
     names = require_exclusions(config)
     indexed = {name.lower(): name for name in store.projects()}
+    record = store.project_record
+    left_out = {name.strip().lower() for name in record.excluded} if record else set()
     resolved: list[str] = []
     for position, name in enumerate(names, start=1):
-        match = indexed.get(name.strip().lower())
+        key = name.strip().lower()
+        match = indexed.get(key)
+        if match is None and key in left_out:
+            continue
         if match is None:
             raise ConfigError(
                 f"[mcp] exclude_projects entry {position} of {len(names)} "

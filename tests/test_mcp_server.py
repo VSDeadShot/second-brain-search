@@ -471,3 +471,23 @@ def test_registration_steps_name_no_excluded_project() -> None:
     # Reported by position, so a failure doesn't print the private name either.
     named = [i for i, name in enumerate(excluded, start=1) if name.lower() in doc]
     assert named == [], f"exclude_projects entries {named} appear in the docstring"
+
+
+# --- a project excluded at index time ----------------------------------------------
+
+
+def test_the_server_works_when_its_hidden_project_was_excluded_at_index_time(
+    tmp_path: Path, search_corpus: Path
+) -> None:
+    """Hidden was never indexed, and the index recorded that. [mcp] still names it, so the
+    server must start and serve - not refuse every call as if the name were a typo."""
+    index_dir = tmp_path / "chroma"
+    embedder = KeywordEmbedder()
+    index_corpus(search_corpus, index_dir, embedder, exclude=("hidden",))
+
+    server = make_server(search_corpus, index_dir, embedder, exclude=("Hidden",))
+    listed, searched = calls(server, [("list_projects", {}), ("search", {"query": "caching"})])
+
+    assert listed.structured_content == {"projects": ["Alpha", "Beta"]}
+    assert not searched.is_error, searched.content[0].text
+    assert {r["project"] for r in searched.structured_content["results"]} <= {"Alpha", "Beta"}

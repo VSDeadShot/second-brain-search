@@ -12,7 +12,9 @@ and incremental writes refuse that.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,25 @@ from .chunking import Chunk
 
 DEFAULT_COLLECTION = "documents"
 _NAMESPACE_KEY = "embedding_namespace"
+_PROJECT_RECORD_KEY = "project_record"
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    """What a rebuild recorded about projects. Stored as one JSON object under one
+    metadata key (Chroma metadata values are scalars), so a new field joins the object
+    rather than adding a second format."""
+
+    excluded: tuple[str, ...] = ()
+    """`[discovery] exclude_projects` as this rebuild applied it - left out on purpose."""
+
+    def to_json(self) -> str:
+        return json.dumps({"excluded": list(self.excluded)})
+
+    @classmethod
+    def from_json(cls, raw: str) -> ProjectRecord:
+        data = json.loads(raw)
+        return cls(excluded=tuple(data.get("excluded", ())))
 
 
 class VectorSpaceMismatch(Exception):
@@ -49,6 +70,13 @@ class ChunkStore:
     def namespace(self) -> str | None:
         """The vector space this index was built in, or None if never recorded."""
         return (self._collection.metadata or {}).get(_NAMESPACE_KEY)
+
+    @property
+    def project_record(self) -> ProjectRecord | None:
+        """What the last rebuild recorded about projects, or None for an index built
+        before projects were recorded."""
+        raw = (self._collection.metadata or {}).get(_PROJECT_RECORD_KEY)
+        return ProjectRecord.from_json(raw) if raw is not None else None
 
     def record_namespace(self, namespace: str) -> None:
         # Only the namespace key is passed: re-sending "hnsw:space" makes Chroma
@@ -139,11 +167,15 @@ class ChunkStore:
     def projects(self) -> list[str]:
         return sorted({m["project"] for m in self.all_metadata()}, key=str.lower)
 
-    def reset(self, *, namespace: str | None = None) -> None:
+    def reset(
+        self, *, namespace: str | None = None, project_record: ProjectRecord | None = None
+    ) -> None:
         self._client.delete_collection(self.collection_name)
         metadata: dict[str, Any] = {"hnsw:space": "cosine"}
         if namespace is not None:
             metadata[_NAMESPACE_KEY] = namespace
+        if project_record is not None:
+            metadata[_PROJECT_RECORD_KEY] = project_record.to_json()
         self._collection = self._client.get_or_create_collection(
             name=self.collection_name, metadata=metadata
         )
