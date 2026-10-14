@@ -231,13 +231,20 @@ location.
 
 ## Evaluation
 
-`eval/retrieval_v2.toml` holds 14 questions. Each one is scored by a single check:
+`eval/retrieval_v2.toml` holds 15 questions. Each one is scored by a single check:
 
 - **text:** a top-k passage from an expected project must contain a given string. Used for facts.
 - **project:** every expected project must appear in the top k. Used for "which of my projects…"
   questions.
 - **no answer (trap):** nothing in the corpus answers it. It isn't scored; whether `sbs ask`
   refuses it is checked by asking.
+- **lure:** a trap that names a lure, a passage from another project that looks like an answer.
+  It passes only if that passage is in the context the model reads. A lure crowded out by the
+  caps would leave the trap testing nothing, so the question fails instead.
+
+Traps are checked over repeated `sbs ask` runs, not once. A trap counts as refused only if every
+run returns no answer (`answerable=False`) without the uncited warning. An answer the model
+wrote but didn't cite is a failure, not a refusal.
 
 The latest report (2026-10-03, k=10) has **11 of 11 scored questions passing**: text 7/7 and
 project 4/4. The 3 traps were refused by `sbs ask` on 2026-10-03. The eval measures retrieval,

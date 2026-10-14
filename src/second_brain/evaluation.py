@@ -11,6 +11,11 @@ Each question is scored by one of three checks, chosen by the fields it carries:
 - no-answer: nothing in the corpus answers it. Scores are kept so a weak match
   stays visible, but nothing is passed or failed; whether `sbs ask` refuses is
   checked by asking, since this suite never generates.
+- lure: a no-answer question naming a lure - another project's passage that
+  looks like an answer. It passes only if a passage from `lure_project`
+  containing `lure_text` is in the context the model would read. A trap whose
+  lure never reaches the model tests nothing (Q13's was crowded out by the
+  per-project cap), so that FAILS instead of passing quietly.
 
 Scoring stays mechanical so retrieval changes are comparable between runs.
 Whether an answer is any good stays a human judgement.
@@ -43,11 +48,12 @@ from .store import ChunkStore
 # comparable with old v1 runs and isn't.
 SUPPORTED_VERSIONS = (2,)
 _REQUIRED = ("id", "category", "text", "expected_projects")
-_OPTIONAL = ("also_in_corpus", "notes", "expected_text")
+_OPTIONAL = ("also_in_corpus", "notes", "expected_text", "lure_project", "lure_text")
 
 CHECK_TEXT = "text"
 CHECK_PROJECT = "project"
 CHECK_NO_ANSWER = "no-answer"
+CHECK_LURE = "lure"
 
 
 class EvalSuiteError(Exception):
@@ -63,6 +69,8 @@ class EvalQuestion:
     also_in_corpus: tuple[str, ...] = ()
     notes: str = ""
     expected_text: tuple[str, ...] = ()
+    lure_project: str = ""
+    lure_text: str = ""
 
     @property
     def expects_no_answer(self) -> bool:
@@ -72,7 +80,7 @@ class EvalQuestion:
     @property
     def check(self) -> str:
         if self.expects_no_answer:
-            return CHECK_NO_ANSWER
+            return CHECK_LURE if self.lure_text else CHECK_NO_ANSWER
         return CHECK_TEXT if self.expected_text else CHECK_PROJECT
 
 
@@ -106,6 +114,7 @@ class QuestionOutcome:
     """None for a no-answer question, which is neither passed nor failed."""
     reason: str = ""
     text_matches: tuple[TextMatch, ...] = ()
+    lure_match: TextMatch | None = None
 
     @property
     def expects_no_answer(self) -> bool:
@@ -144,6 +153,20 @@ def _expected_text(raw: dict[str, Any], where: str) -> tuple[str, ...]:
     return tuple(v.strip() for v in value)
 
 
+def _lure(raw: dict[str, Any], where: str) -> tuple[str, str]:
+    present = [key for key in ("lure_project", "lure_text") if key in raw]
+    if not present:
+        return "", ""
+    if len(present) == 1:
+        raise EvalSuiteError(f"{where}: lure_project and lure_text go together")
+    for key in present:
+        if not isinstance(raw[key], str) or not raw[key].strip():
+            raise EvalSuiteError(f"{where}: {key} must be a non-blank string")
+    if raw["expected_projects"]:
+        raise EvalSuiteError(f"{where}: a lure belongs on a question that expects no answer")
+    return raw["lure_project"].strip(), raw["lure_text"].strip()
+
+
 def _question_from(raw: dict[str, Any], index: int, seen: set[str]) -> EvalQuestion:
     where = raw.get("id") or f"question #{index + 1}"
 
@@ -162,6 +185,7 @@ def _question_from(raw: dict[str, Any], index: int, seen: set[str]) -> EvalQuest
             raise EvalSuiteError(f"{where}: {key} must be a list of strings")
 
     expected_text = _expected_text(raw, where)
+    lure_project, lure_text = _lure(raw, where)
 
     seen.add(raw["id"])
     return EvalQuestion(
@@ -172,6 +196,8 @@ def _question_from(raw: dict[str, Any], index: int, seen: set[str]) -> EvalQuest
         also_in_corpus=tuple(raw.get("also_in_corpus", ())),
         notes=str(raw.get("notes", "")).strip(),
         expected_text=expected_text,
+        lure_project=lure_project,
+        lure_text=lure_text,
     )
 
 
@@ -245,8 +271,28 @@ def evaluate_question(
     )
     top_score = results[0].score if results else None
     matches: tuple[TextMatch, ...] = ()
+    lure_match: TextMatch | None = None
 
-    if question.check == CHECK_NO_ANSWER:
+    if question.check == CHECK_LURE:
+        # Same rule as a fact: passage text only, and only from the lure's own project -
+        # this repo's eval commits will quote the lure text too.
+        lure = _text_matches((question.lure_text,), (question.lure_project,), results)
+        lure_match = lure[0] if lure else None
+        passed = lure_match is not None
+        if lure_match is not None:
+            reason = (
+                f"lure {lure_match.text!r} in context at rank {lure_match.rank} "
+                f"({lure_match.project} / {lure_match.rel_path} #{lure_match.chunk_index}); "
+                "whether it refuses is checked with `sbs ask`"
+            )
+        else:
+            came_back = "returned" if question.lure_project in returned else "not returned"
+            reason = (
+                f"LURE NOT IN CONTEXT: no {question.lure_project} passage containing "
+                f"{question.lure_text!r} in the {len(results)} passages "
+                f"({question.lure_project} {came_back}) - this trap tests nothing"
+            )
+    elif question.check == CHECK_NO_ANSWER:
         passed = None
         best = f"top score {top_score:.3f}" if top_score is not None else "nothing retrieved"
         reason = f"expects no answer; {best}"
@@ -279,6 +325,7 @@ def evaluate_question(
         passed=passed,
         reason=reason,
         text_matches=matches,
+        lure_match=lure_match,
     )
 
 
@@ -289,13 +336,15 @@ def _summarise(outcomes: Sequence[QuestionOutcome]) -> dict[str, Any]:
             "scored": sum(1 for o in outcomes if o.check == check),
             "passed": sum(1 for o in outcomes if o.check == check and o.passed),
         }
-        for check in (CHECK_TEXT, CHECK_PROJECT)
+        for check in (CHECK_TEXT, CHECK_PROJECT, CHECK_LURE)
     }
     return {
         "questions": len(outcomes),
         "passed": sum(1 for o in outcomes if o.passed is True),
         "failed": sum(1 for o in outcomes if o.passed is False),
         "no_answer": sum(1 for o in outcomes if o.passed is None),
+        # Every question that expects no answer, lured or not; refusal is checked by asking.
+        "traps": sum(1 for o in outcomes if o.expects_no_answer),
         "by_check": by_check,
         # Project-level counts, kept so v2 reports can be read beside v1 ones.
         "expecting_an_answer": len(expecting),
@@ -332,6 +381,16 @@ def run_eval(
     )
 
 
+def _match_to_dict(m: TextMatch) -> dict[str, Any]:
+    return {
+        "text": m.text,
+        "rank": m.rank,
+        "project": m.project,
+        "rel_path": m.rel_path,
+        "chunk_index": m.chunk_index,
+    }
+
+
 def report_to_dict(report: EvalReport) -> dict[str, Any]:
     return {
         "suite_version": report.suite_version,
@@ -355,16 +414,10 @@ def report_to_dict(report: EvalReport) -> dict[str, Any]:
                 "missing": list(o.missing),
                 "projects_returned": list(o.projects_returned),
                 "top_score": o.top_score,
-                "text_matches": [
-                    {
-                        "text": m.text,
-                        "rank": m.rank,
-                        "project": m.project,
-                        "rel_path": m.rel_path,
-                        "chunk_index": m.chunk_index,
-                    }
-                    for m in o.text_matches
-                ],
+                "text_matches": [_match_to_dict(m) for m in o.text_matches],
+                "lure_project": o.question.lure_project,
+                "lure_text": o.question.lure_text,
+                "lure_match": _match_to_dict(o.lure_match) if o.lure_match else None,
                 "results": [
                     {
                         "rank": rank,

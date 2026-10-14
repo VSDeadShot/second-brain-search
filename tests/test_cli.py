@@ -749,6 +749,51 @@ def test_eval_output_names_the_verdict_check_and_reason(tmp_path: Path, knowledg
     assert "2 of 3 scored questions passed" in result.output
 
 
+LURE_SUITE = """
+version = 2
+
+[[question]]
+id = "lure-hit"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "write ahead log"
+
+[[question]]
+id = "lure-miss"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "docker compose"
+"""
+
+
+def test_eval_output_shows_whether_each_lure_reached_the_context(
+    tmp_path: Path, knowledge: Path
+) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    suite = tmp_path / "lures.toml"
+    suite.write_text(LURE_SUITE, encoding="utf-8")
+
+    result = run(
+        ["eval", "--fixture", str(suite), "--out", str(tmp_path / "r")],
+        scan_root=knowledge,
+        index_dir=index_dir,
+        factory=keyword_factory,
+    )
+
+    line = {q: next(l for l in result.output.splitlines() if l.strip().startswith(q))
+            for q in ("lure-hit", "lure-miss")}
+    assert "PASS" in line["lure-hit"] and "lure" in line["lure-hit"]
+    assert "'write ahead log' in context at rank" in line["lure-hit"]
+    assert "FAIL" in line["lure-miss"] and "LURE NOT IN CONTEXT" in line["lure-miss"]
+    assert "1 of 2 scored questions passed" in result.output
+    assert "lure 1/2" in result.output
+    assert "2 traps" in result.output
+
+
 # --- failure wording ------------------------------------------------------------
 
 

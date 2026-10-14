@@ -540,12 +540,15 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
         )
 
     summary = report.summary
-    text, project = summary["by_check"]["text"], summary["by_check"]["project"]
+    by_check = summary["by_check"]
     scored = summary["passed"] + summary["failed"]
+    checks = ", ".join(
+        f"{check} {by_check[check]['passed']}/{by_check[check]['scored']}"
+        for check in ("text", "project", "lure")
+    )
     click.echo(
-        f"\n{summary['passed']} of {scored} scored questions passed "
-        f"(text {text['passed']}/{text['scored']}, project {project['passed']}/{project['scored']}); "
-        f"{summary['no_answer']} expect no answer."
+        f"\n{summary['passed']} of {scored} scored questions passed ({checks}); "
+        f"{summary['traps']} traps - whether they refuse is checked with `sbs ask`."
     )
 
     reports_dir.mkdir(parents=True, exist_ok=True)

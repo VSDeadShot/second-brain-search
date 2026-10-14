@@ -121,7 +121,7 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     by_id = {q.id: q for q in suite.questions}
 
     assert suite.version == 2
-    assert len(suite.questions) == len(by_id) == 14
+    assert len(suite.questions) == len(by_id) == 15
     assert all(q.text and q.category for q in suite.questions)
     assert "q1-flashcards-model" not in by_id
     # DECISIONS.md records the move from 3.7 to 3.6 and why. 3.7 is also in that
@@ -137,6 +137,13 @@ def test_the_committed_suite_splits_q1_into_a_fact_and_a_rationale() -> None:
     q13 = by_id["q13-macro-push-notifications"]
     assert q13.category == "trap"
     assert "cacd64b" in q13.notes
+    # Q14's lure is checked in code: an RDBMS passage must reach the context.
+    q14 = by_id["q14-bixby-docker"]
+    assert (q14.category, q14.check, q14.expected_projects) == ("trap", "lure", ())
+    assert (q14.lure_project, q14.lure_text) == ("RDBMS", "using Docker and Docker Compose")
+    assert [q.id for q in suite.questions if q.check == "lure"] == ["q14-bixby-docker"]
+    # The refusal rule: an uncited answer is not a refusal.
+    assert "answerable=False" in q14.notes and "uncited" in q14.notes
 
 
 def test_fact_questions_carry_the_string_that_states_the_fact() -> None:
@@ -572,6 +579,7 @@ def test_summary_counts_passes_per_check(tmp_path: Path, indexed_knowledge) -> N
     assert summary["by_check"] == {
         "text": {"scored": 2, "passed": 1},
         "project": {"scored": 1, "passed": 1},
+        "lure": {"scored": 0, "passed": 0},
     }
     # The old project-level counts stay, so v2 reports can be read beside v1 ones.
     assert summary["all_expected_found"] == 3
@@ -628,3 +636,170 @@ def test_the_committed_suite_names_no_excluded_project() -> None:
     # Reported by line number, so a failure doesn't print the private name either.
     named = [n for n, line in enumerate(lines, start=1) if any(name in line for name in names)]
     assert named == [], f"lines {named} of the committed eval suite name an excluded project"
+
+
+# --- trap lures: lure_project + lure_text --------------------------------------------
+#
+# A trap tests nothing if no plausible wrong answer reaches the model. Q13's lure was
+# crowded out by the per-project cap and nobody could tell. A lure names another
+# project's passage that must be in the context the model reads; if it drops out,
+# the question FAILS rather than silently testing nothing.
+
+LURE = """
+version = 2
+
+[[question]]
+id = "q14"
+category = "trap"
+text = "How did I containerize Alpha with Docker?"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "using Docker and Docker Compose"
+"""
+
+DOCKER = "You can spin up the entire application using Docker and Docker Compose."
+
+
+def _trap(*, lure_project: str = "RDBMS", lure_text: str = "using Docker and Docker Compose"):
+    from second_brain.evaluation import EvalQuestion
+
+    return EvalQuestion(
+        id="q14",
+        category="trap",
+        text="t",
+        expected_projects=(),
+        lure_project=lure_project,
+        lure_text=lure_text,
+    )
+
+
+def test_a_lure_is_loaded_on_a_trap(tmp_path: Path) -> None:
+    question = load_eval_suite(write(tmp_path, LURE)).questions[0]
+
+    assert (question.lure_project, question.lure_text) == ("RDBMS", "using Docker and Docker Compose")
+    assert question.expects_no_answer is True
+    assert question.check == "lure"
+
+
+@pytest.mark.parametrize("dropped", ["lure_project", "lure_text"])
+def test_a_lure_needs_both_its_project_and_its_text(tmp_path: Path, dropped: str) -> None:
+    body = "\n".join(line for line in LURE.splitlines() if not line.startswith(dropped))
+
+    with pytest.raises(EvalSuiteError, match="lure_project and lure_text"):
+        load_eval_suite(write(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "line", ['lure_project = ""', 'lure_text = "   "', "lure_text = 3", 'lure_project = ["RDBMS"]']
+)
+def test_lure_fields_must_be_non_blank_strings(tmp_path: Path, line: str) -> None:
+    key = line.split(" ")[0]
+    body = "\n".join(line if old.startswith(key) else old for old in LURE.splitlines())
+
+    with pytest.raises(EvalSuiteError, match=f"{key} must be a non-blank string"):
+        load_eval_suite(write(tmp_path, body))
+
+
+def test_a_lure_on_a_question_that_expects_an_answer_is_rejected(tmp_path: Path) -> None:
+    body = LURE.replace("expected_projects = []", 'expected_projects = ["Alpha"]')
+
+    with pytest.raises(EvalSuiteError, match="a lure belongs on a question that expects no answer"):
+        load_eval_suite(write(tmp_path, body))
+
+
+def test_a_lure_in_the_context_passes_and_says_where() -> None:
+    outcome = evaluate_question(
+        _trap(),
+        [passage("bixby", project="Alpha"), passage(DOCKER, project="RDBMS", rel_path="README.md", index=8)],
+    )
+
+    assert (outcome.check, outcome.passed) == ("lure", True)
+    assert outcome.lure_match is not None and outcome.lure_match.rank == 2
+    assert "in context at rank 2 (RDBMS / README.md #8)" in outcome.reason
+    assert "sbs ask" in outcome.reason  # the refusal half is still checked by asking
+
+
+def test_a_lure_quoted_by_another_project_does_not_count() -> None:
+    """This repo's own eval commit will quote the lure text once q14 is committed."""
+    outcome = evaluate_question(_trap(), [passage(DOCKER, project="Second Brain", rel_path="commit abc1234")])
+
+    assert outcome.passed is False
+    assert outcome.lure_match is None
+    assert "LURE NOT IN CONTEXT" in outcome.reason and "RDBMS not returned" in outcome.reason
+
+
+def test_a_lure_only_in_a_heading_does_not_count() -> None:
+    outcome = evaluate_question(_trap(), [passage("Install the tools first.", project="RDBMS", heading=DOCKER)])
+
+    assert outcome.passed is False
+    assert "RDBMS returned" in outcome.reason
+
+
+def test_a_lure_that_drops_out_of_the_context_fails_loudly() -> None:
+    outcome = evaluate_question(_trap(), [passage("bixby", project="Alpha"), passage("relay", project="Alpha")])
+
+    assert outcome.passed is False
+    assert "LURE NOT IN CONTEXT" in outcome.reason
+    assert "'using Docker and Docker Compose'" in outcome.reason
+    assert "in the 2 passages" in outcome.reason
+    assert "tests nothing" in outcome.reason
+
+
+def test_a_lure_broken_by_a_line_wrap_still_matches() -> None:
+    wrapped = "spin it up using Docker and\nDocker   Compose."
+
+    assert evaluate_question(_trap(), [passage(wrapped, project="RDBMS")]).passed is True
+
+
+LURES = """
+version = 2
+
+[[question]]
+id = "lure-hit"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "write ahead log"
+
+[[question]]
+id = "lure-miss"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "docker compose"
+
+[[question]]
+id = "none"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+"""
+
+
+def test_summary_counts_lures_and_traps(tmp_path: Path, indexed_knowledge) -> None:
+    store, embedder = indexed_knowledge
+    suite = load_eval_suite(write(tmp_path, LURES))
+
+    summary = run_eval(suite, embedder, store, k=5).summary
+
+    assert summary["by_check"]["lure"] == {"scored": 2, "passed": 1}
+    assert (summary["passed"], summary["failed"], summary["no_answer"]) == (1, 1, 1)
+    assert summary["traps"] == 3
+
+
+def test_report_json_carries_the_lure(tmp_path: Path, indexed_knowledge) -> None:
+    store, embedder = indexed_knowledge
+    suite = load_eval_suite(write(tmp_path, LURES))
+
+    questions = {q["id"]: q for q in report_to_dict(run_eval(suite, embedder, store, k=5))["questions"]}
+
+    hit, miss, none = questions["lure-hit"], questions["lure-miss"], questions["none"]
+    assert (hit["check"], hit["passed"]) == ("lure", True)
+    assert (hit["lure_project"], hit["lure_text"]) == ("RDBMS", "write ahead log")
+    assert set(hit["lure_match"]) == {"text", "rank", "project", "rel_path", "chunk_index"}
+    assert (miss["passed"], miss["lure_match"]) == (False, None)
+    assert (none["check"], none["lure_project"], none["lure_match"]) == ("no-answer", "", None)
+    json.dumps(questions)
+

@@ -224,3 +224,25 @@ pulled in 5 macro-tracker passages (top 0.63, the per-project cap), so this run 
 project pull, not the lure. Stays a trap only while Macro Tracker has no notifications or
 reminders.
 """
+
+[[question]]
+id = "q14-bixby-docker"
+category = "trap"
+text = "How did I containerize Bixby PC Navigator with Docker?"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "using Docker and Docker Compose"
+notes = """
+Nothing in bixby-workspace answers this: on 2026-10-14 none of its 32 indexed chunks matched
+docker, container or compose, and its 6 "deploy" hits are Bixby Marketplace capsule
+deployment. The lure is RDBMS README.md "Running with Docker" ("spin up the entire
+application ... using Docker and Docker Compose"), a how-to from another project. Unlike
+Q13's, it reaches the context: bixby-workspace is small, so it fills only its 5 per-project
+slots, and on 2026-10-14 the lure sat at rank 6 (0.669), 0.037 above the first passage the
+caps cut (0.632). The lure check fails this question if the lure drops out.
+Refusal rule: a trap is checked over repeated `sbs ask` runs, not once, and every run must
+return answerable=False with no uncited warning. An uncited answer ("The model wrote an
+answer but cited no passage") is a FAIL, not a refusal. On 2026-10-14, 6 of 6 runs refused
+(temperature 0, gemini-3.5-flash-lite, lure at rank 6 each time). Stays a trap only while
+bixby-workspace has no Docker setup.
+"""
