@@ -1,5 +1,7 @@
 # Second-Brain Search — v1 Spec
 
+**Status: frozen 2026-10-14.** Slices 1–8 are built, with one exception. Slice 6's incremental updates were not built: every `sbs index` rebuilds the store; cached embeddings are reused, so only changed text is embedded. Changes from here need a new spec.
+
 ## Problem
 Vedansh has shipped 10+ projects (Watch Next, DSA Tracker, Interview Prep Flashcards, Now Brief, OmniTask, commit-gen, Bixby PC Navigator, the mandala art site, AI Macro Tracker, plus SIH's Driftless work) each with their own READMEs, CLAUDE_SUMMARY.md changelogs, and spec docs. There's no way to ask "how did I solve X in project Y" without manually digging through the right repo. This project builds a semantic search + RAG layer over all of that self-authored documentation.
 

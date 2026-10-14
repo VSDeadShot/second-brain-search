@@ -243,6 +243,8 @@ caps cut (0.632). The lure check fails this question if the lure drops out.
 Refusal rule: a trap is checked over repeated `sbs ask` runs, not once, and every run must
 return answerable=False with no uncited warning. An uncited answer ("The model wrote an
 answer but cited no passage") is a FAIL, not a refusal. On 2026-10-14, 6 of 6 runs refused
-(temperature 0, gemini-3.5-flash-lite, lure at rank 6 each time). Stays a trap only while
-bixby-workspace has no Docker setup.
+(temperature 0, gemini-3.5-flash-lite, lure at rank 6 each time). Repeated runs catch
+nondeterministic flips at temperature 0; they don't test robustness to different wording.
+Freeze run 2026-10-14: 3 of 3 refused, and two paraphrases with the lure in context (ranks 6
+and 7) each refused once. Stays a trap only while bixby-workspace has no Docker setup.
 """

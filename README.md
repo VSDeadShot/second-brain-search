@@ -6,7 +6,9 @@ when nothing it finds answers the question, it says so instead of guessing.
 
 **Why:** I kept forgetting how I'd solved things across my own projects.
 **Stack:** Python, Gemini embeddings + generation, ChromaDB, Click, MCP, pytest.
-**Status:** Feature-complete; in polish/freeze.
+**Status:** Frozen 2026-10-14. Every slice in SPEC.md is built, with one exception. Slice 6's
+incremental updates were not built: every `sbs index` rebuilds the store; cached embeddings are
+reused, so only changed text is embedded.
 
 ## Example
 
@@ -143,7 +145,7 @@ index the project it meant to skip. The refusal gives the entry's position, neve
 sbs discover                     # list the doc files that would be indexed (no API key)
 sbs discover --json
 sbs index --dry-run              # chunk counts and how many texts need embedding; no key, no writes
-sbs index                        # full rebuild; cached vectors are reused
+sbs index                        # rebuilds the store; only changed text is embedded
 sbs search "rate limiting" -k 5 --project "Watch Tracker"
 sbs ask "How did I fix the IDOR in DSA Tracker's submitReview?" --show-context
 sbs eval                         # writes data/eval/retrieval-v2-<timestamp>.json
@@ -245,11 +247,13 @@ location.
 
 Traps are checked over repeated `sbs ask` runs, not once. A trap counts as refused only if every
 run returns no answer (`answerable=False`) without the uncited warning. An answer the model
-wrote but didn't cite is a failure, not a refusal.
+wrote but didn't cite is a failure, not a refusal. Repeated runs catch a refusal that flips from
+run to run; they don't test whether it survives different wording.
 
-The latest report (2026-10-03, k=10) has **11 of 11 scored questions passing**: text 7/7 and
-project 4/4. The 3 traps were refused by `sbs ask` on 2026-10-03. The eval measures retrieval,
-not whether a generated answer is correct.
+The freeze report (2026-10-14, k=10) has **12 of 12 scored questions passing**: text 7/7,
+project 4/4 and lure 1/1, and `sbs eval` exits 0. Each of the 4 traps was asked 3 times at the
+freeze and refused every time. The eval measures retrieval, not whether a generated answer is
+correct.
 
 ## Known limitations
 
@@ -271,10 +275,12 @@ not whether a generated answer is correct.
   retrieval slot.
 - **Short contexts.** Capped retrieval never tops passages back up, so a question naming a
   large project can end up seeing only that project's passages. One trap, q13, had its
-  cross-project lure crowded out this way, so it hasn't yet tested whether the model resists a
-  plausible passage from another project.
-- **Rebuilds only.** Every `sbs index` is a full rebuild, with no incremental updates or file
-  watching.
+  cross-project lure crowded out this way. q14's lure does reach the model, and the eval fails
+  if it stops doing so.
+- **Trap refusals are stable, not proven robust.** They're checked at temperature 0 on fixed
+  wording. Two rewordings of one trap were checked once at the freeze, and both were refused.
+- **Rebuilds only.** Every `sbs index` rebuilds the store; cached embeddings are reused, so only
+  changed text is embedded. There are no incremental updates and no file watching.
 - **Shelved for lack of a failing case:** code-aware chunking, and lifting the per-file cap
   under `--project`.
 
