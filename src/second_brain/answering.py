@@ -3,9 +3,10 @@
 Retrieval finds passages, generation writes prose; this module is the part that
 refuses. One rule drives it: an answer nobody can trace back to a passage is not
 an answer, however confident it reads. So a claimed answer that cites nothing -
-or cites only passage numbers that don't exist - is turned into a refusal with a
-warning, and its text is discarded rather than printed with a caveat. A caveat
-is something a hurried reader skips.
+or cites only passage numbers that don't exist - is not answerable: it is flagged
+`uncited` with a warning, and its text is discarded rather than printed with a
+caveat. A caveat is something a hurried reader skips. It is not a refusal either,
+since the model did claim an answer, and the CLI says so.
 
 Citations are resolved here, from the numbers the model returned to the chunks
 they name. The model never names a file, so it cannot cite a document that isn't
@@ -49,6 +50,9 @@ class Answer:
     """Everything retrieved, cited or not - a refusal shows the closest few."""
     warnings: tuple[str, ...]
     model: str
+    uncited: bool = False
+    """The model claimed an answer but cited no valid passage. Not answerable, and
+    not a refusal either - the text is withheld, but the claim was made."""
 
 
 def _refusal(
@@ -56,6 +60,8 @@ def _refusal(
     passages: Sequence[RetrievedChunk],
     model: str,
     warnings: tuple[str, ...] = (),
+    *,
+    uncited: bool = False,
 ) -> Answer:
     return Answer(
         question=question,
@@ -65,6 +71,7 @@ def _refusal(
         passages=tuple(passages),
         warnings=warnings,
         model=model,
+        uncited=uncited,
     )
 
 
@@ -128,7 +135,7 @@ def answer_question(
 
     citations, warnings = _resolve_citations(raw, passages, dates)
     if not citations:
-        return _refusal(question, passages, model, warnings + (UNCITED_WARNING,))
+        return _refusal(question, passages, model, warnings + (UNCITED_WARNING,), uncited=True)
 
     return Answer(
         question=question,

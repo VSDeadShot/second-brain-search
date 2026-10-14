@@ -995,6 +995,38 @@ def test_ask_never_prints_an_answer_that_cites_nothing(tmp_path: Path, knowledge
     assert "cited no passage" in result.output
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [RawAnswer(True, "It uses a canvas, obviously.", ()), RawAnswer(True, "It uses a canvas [9].", (9,))],
+    ids=["no-citations", "invalid-citations"],
+)
+def test_ask_shows_an_uncited_answer_as_unsupported_not_as_no_answer(
+    tmp_path: Path, knowledge: Path, raw: RawAnswer
+) -> None:
+    """Printing "No answer" for a claim the model made would read as a refusal."""
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["photo compression"], knowledge=knowledge, index_dir=index_dir,
+                 generator=generator_factory(raw))
+
+    assert "No answer in your documentation" not in result.output
+    assert 'Unsupported answer for: "photo compression"' in result.output
+    assert "The model wrote an answer but cited no passage." in result.output
+    assert "Warning: The model wrote an answer but cited no passage" in result.output
+    assert "canvas" not in result.output.split("Closest passages")[0]  # the claim stays hidden
+    assert "Closest passages (not an answer):" in result.output
+
+
+def test_ask_still_shows_a_real_refusal_as_no_answer(tmp_path: Path, knowledge: Path) -> None:
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+
+    result = ask(["photo compression"], knowledge=knowledge, index_dir=index_dir,
+                 generator=generator_factory(RawAnswer(False, "", ())))
+
+    assert 'No answer in your documentation for: "photo compression"' in result.output
+    assert "Unsupported" not in result.output and "Warning:" not in result.output
+
+
 def test_ask_show_context_prints_every_retrieved_passage(tmp_path: Path, knowledge: Path) -> None:
     index_dir = indexed_knowledge(tmp_path, knowledge)
 

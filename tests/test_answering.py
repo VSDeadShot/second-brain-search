@@ -138,6 +138,28 @@ def test_an_answerable_response_with_no_text_is_a_refusal(indexed, dates) -> Non
     assert not ask(indexed, generator, dates).answerable
 
 
+# An uncited answer is not a refusal: the model claimed an answer it couldn't trace.
+# Callers - the CLI, the trap checks - must be able to tell the two apart.
+
+
+def test_an_answer_citing_nothing_is_flagged_uncited(indexed, dates) -> None:
+    answer = ask(indexed, FakeGenerator(RawAnswer(True, "It uses redis, obviously.", ())), dates)
+
+    assert (answer.answerable, answer.uncited) == (False, True)
+
+
+def test_an_answer_whose_every_citation_is_invalid_is_flagged_uncited(indexed, dates) -> None:
+    answer = ask(indexed, FakeGenerator(RawAnswer(True, "It uses redis [42].", (42,))), dates)
+
+    assert (answer.answerable, answer.uncited) == (False, True)
+
+
+def test_a_real_refusal_is_not_flagged_uncited(indexed, dates) -> None:
+    answer = ask(indexed, FakeGenerator(RawAnswer(False, "", ())), dates)
+
+    assert (answer.answerable, answer.uncited) == (False, False)
+
+
 # --- refusals -------------------------------------------------------------------
 
 

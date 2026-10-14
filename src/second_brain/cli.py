@@ -586,7 +586,15 @@ def format_answer(answer: Answer, *, show_context: bool = False) -> str:
         lines += [answer.text, "", "Sources:"]
         lines += [_source_line(c) for c in answer.citations]
     else:
-        lines += [f'No answer in your documentation for: "{answer.question}"', ""]
+        if answer.uncited:
+            # The model did answer, untraceably. "No answer" would read as a refusal.
+            lines += [
+                f'Unsupported answer for: "{answer.question}"',
+                "The model wrote an answer but cited no passage.",
+                "",
+            ]
+        else:
+            lines += [f'No answer in your documentation for: "{answer.question}"', ""]
         if answer.passages:
             # Shown so a refusal can be checked rather than just believed - and
             # labelled, because these passages are what did NOT answer it.
@@ -625,7 +633,8 @@ def ask(ctx: click.Context, question: str, k: int, project: str | None, show_con
     """Answer QUESTION from your documentation, with citations.
 
     Costs one embedded text and one generation request. An answer that cites
-    nothing is shown as a refusal - there would be nothing to check it against.
+    nothing is shown as unsupported, with its text withheld - there would be
+    nothing to check it against.
     """
     config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
