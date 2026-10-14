@@ -1,11 +1,12 @@
 """Chunking: heading-aware, size-capped, with overlap."""
 
 import hashlib
+import random
 from pathlib import Path
 
 import pytest
 
-from second_brain.chunking import chunk_document
+from second_brain.chunking import _split_with_overlap, chunk_document
 
 
 def test_short_document_is_one_chunk(doc_factory) -> None:
@@ -231,3 +232,135 @@ def test_content_hash_covers_the_embedded_text(doc_factory) -> None:
     assert old.text == new.text
     assert old.content_hash != new.content_hash
     assert old.content_hash == hashlib.sha256(old.embed_text.encode("utf-8")).hexdigest()
+
+
+# --- word boundaries ------------------------------------------------------------
+# _split_with_overlap is shared with git_history. A cut prefers a paragraph break,
+# then a line break, then a space; it falls mid-word only when the window's tail has
+# no whitespace at all. The overlap start snaps forward to a word boundary.
+
+
+def _prose(seed: int, chars: int) -> str:
+    """Random lowercase words, so a fragment of one word is unlikely to be another."""
+    rng = random.Random(seed)
+    words: list[str] = []
+    while sum(len(w) + 1 for w in words) < chars:
+        length = rng.randint(2, 10)
+        words.append("".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(length)))
+    return " ".join(words)
+
+
+def _spans(text: str, pieces: list[str]) -> list[tuple[int, int]]:
+    """Where each (stripped) piece sits in `text`, in order."""
+    spans: list[tuple[int, int]] = []
+    lo = 0
+    for n, piece in enumerate(pieces):
+        # A short final piece could also match earlier, inside the overlap.
+        if n == len(pieces) - 1 and text.endswith(piece):
+            start = len(text) - len(piece)
+        else:
+            start = text.index(piece, lo)
+        spans.append((start, start + len(piece)))
+        lo = start + 1
+    return spans
+
+
+def _mid_word(text: str, i: int) -> bool:
+    return 0 < i < len(text) and not text[i - 1].isspace() and not text[i].isspace()
+
+
+def test_continuation_pieces_start_on_a_word_boundary() -> None:
+    text = _prose(1, 3000)
+
+    starts = [s for s, _ in _spans(text, _split_with_overlap(text, 200, 40))]
+
+    assert len(starts) > 5
+    assert [text[s - 6 : s + 6] for s in starts if _mid_word(text, s)] == []
+
+
+def test_text_without_line_breaks_is_cut_at_a_space() -> None:
+    text = _prose(1, 3000)
+
+    ends = [e for _, e in _spans(text, _split_with_overlap(text, 200, 40))]
+
+    assert len(ends) > 5
+    assert [text[e - 6 : e + 6] for e in ends if _mid_word(text, e)] == []
+
+
+def test_split_pieces_still_share_an_overlap() -> None:
+    text = _prose(5, 3000)
+
+    spans = _spans(text, _split_with_overlap(text, 200, 40))
+
+    for (_, prev_end), (start, _) in zip(spans, spans[1:]):
+        assert start < prev_end
+        assert prev_end - start <= 40
+
+
+def test_a_line_break_in_the_tail_beats_a_space() -> None:
+    lines = [_prose(10 + i, 45) for i in range(40)]
+
+    pieces = _split_with_overlap("\n".join(lines), 200, 40)
+
+    assert len(pieces) > 5
+    assert all(piece.splitlines()[-1] in lines for piece in pieces[:-1])
+
+
+def test_an_overlap_inside_one_long_token_starts_at_the_cut() -> None:
+    token = "Q" * 300
+    text = f"{_prose(2, 170)} {token} {_prose(3, 400)}"
+
+    pieces = _split_with_overlap(text, 200, 40)
+
+    assert all(len(p) <= 200 for p in pieces)
+    # No fragment of the token is repeated at the start of the next piece.
+    assert sum(p.count("Q") for p in pieces) == len(token)
+
+
+# Code-point slicing: a hard cut can split a combining mark or a ZWJ sequence
+# (README, Known limitations), but never loses or repeats a character.
+@pytest.mark.parametrize(
+    "text",
+    ["x" * 5000, "漢字かなカナ" * 700, "\U0001F468\u200d\U0001F469\u200d\U0001F467" * 600],
+    ids=["ascii", "cjk", "emoji-zwj"],
+)
+def test_a_run_with_no_whitespace_is_hard_cut_without_repeating_itself(text: str) -> None:
+    pieces = _split_with_overlap(text, 1500, 150)
+
+    assert all(len(p) <= 1500 for p in pieces)
+    assert "".join(pieces) == text
+
+
+def test_a_long_code_line_is_cut_between_tokens(doc_factory) -> None:
+    args = ", ".join(f"argument_{i:03d}" for i in range(60))
+    text = f"# Code\n\n```python\nresult = compute({args})\n```"
+
+    chunks = chunk_document(doc_factory(), text, max_chars=300, overlap=60)
+    spans = _spans(text, [c.text for c in chunks])
+
+    assert len(chunks) > 2
+    assert [text[s - 6 : s + 6] for s, _ in spans if _mid_word(text, s)] == []
+    assert [text[e - 6 : e + 6] for _, e in spans if _mid_word(text, e)] == []
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_split_invariants_hold_on_random_text(seed: int) -> None:
+    rng = random.Random(seed)
+    max_chars = rng.randint(80, 400)
+    overlap = rng.randint(0, max_chars // 2)
+    # Words stay under a tenth of the window, so every window's tail has a space to cut at.
+    parts: list[str] = []
+    while sum(map(len, parts)) < max_chars * 8:
+        length = rng.randint(1, max_chars // 10)
+        parts.append("".join(rng.choice("abcdefghij") for _ in range(length)))
+        parts.append(rng.choice([" "] * 8 + ["\n", "\n\n"]))
+    text = "".join(parts).strip()
+
+    pieces = _split_with_overlap(text, max_chars, overlap)
+    spans = _spans(text, pieces)
+
+    assert all(len(p) <= max_chars for p in pieces)
+    for (_, prev_end), (start, _) in zip(spans, spans[1:]):
+        assert text[prev_end:start].strip() == "", "a gap between pieces"
+        assert prev_end - start <= overlap
+    assert [i for span in spans for i in span if _mid_word(text, i)] == []

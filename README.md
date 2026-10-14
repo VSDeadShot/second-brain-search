@@ -76,9 +76,10 @@ flowchart LR
    dropped here, so their docs and git history are never read. Git history is read from each
    repo's default branch as last fetched, or from local `HEAD` when the repo has no remote.
    Indexing never fetches.
-2. **Chunking** splits each doc at its headings, then caps each chunk at 1,500 characters with a
-   150-character overlap. Chunks under 50 characters are dropped. The heading path is prefixed
-   to the embedded text, so a chunk deep inside a section still carries that section's topic.
+2. **Chunking** splits each doc at its headings, then caps each chunk at 1,500 characters with up
+   to 150 characters of overlap, cutting on word boundaries. Chunks under 50 characters are
+   dropped. The heading path is prefixed to the embedded text, so a chunk deep inside a section
+   still carries that section's topic.
 3. **Embedding** uses `gemini-embedding-001` at 768 dimensions. At that size the API returns
    vectors that aren't unit length, so they're normalised before storage. Vectors are cached
    by model, dimensions, task type and a hash of the text, so unchanged text is never
@@ -255,7 +256,9 @@ not whether a generated answer is correct.
 - **A renamed folder counts as a new project.** Project names are folder names, so after a rename
   `sbs index` refuses until the new name is accepted with `--accept-new`. The old name drops out
   of the index.
-- **Mid-word cuts.** The overlap between split chunks can start a passage mid-word.
+- **Splitting is by code point.** Chunks are cut at paragraph, line or word boundaries, but a run
+  with no whitespace (a long URL, CJK text) is cut at the size cap, which can split a combining
+  mark or an emoji sequence. Characters are never split into bytes.
 - **Near-empty chunks.** A chunk such as a section that is only `npm install` can take a
   retrieval slot.
 - **Short contexts.** Capped retrieval never tops passages back up, so a question naming a

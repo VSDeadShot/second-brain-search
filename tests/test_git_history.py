@@ -8,6 +8,7 @@ file looks like a credential.
 from __future__ import annotations
 
 import hashlib
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -504,6 +505,26 @@ def test_every_piece_of_a_long_commit_names_repo_and_subject() -> None:
         assert len(chunk.text) <= 1500
         assert chunk.embed_text.startswith("DSA Tracker · commit b237453 · 2026-07-02\n")
         assert "refactor: split the scheduler" in chunk.embed_text.split("\n\n")[0]
+
+
+def test_long_commit_pieces_start_and_end_on_word_boundaries() -> None:
+    rng = random.Random(4)
+    words = [
+        "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rng.randint(2, 10)))
+        for _ in range(700)
+    ]
+    commit_ = make_commit(subject="docs: one long paragraph", body=" ".join(words))
+    text = commit_text(commit_, excerpt="")
+
+    chunks = _chunks(commit_)
+
+    def mid_word(i: int) -> bool:
+        return 0 < i < len(text) and not text[i - 1].isspace() and not text[i].isspace()
+
+    assert len(chunks) > 2
+    starts = [text.index(c.text) for c in chunks]
+    ends = [s + len(c.text) for s, c in zip(starts, chunks)]
+    assert [text[i - 6 : i + 6] for i in starts + ends if mid_word(i)] == []
 
 
 def test_a_trivial_root_commit_falls_below_the_floor() -> None:

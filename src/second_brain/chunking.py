@@ -105,8 +105,38 @@ def _split_into_sections(text: str) -> list[_Section]:
     return sections
 
 
+def _mid_word(text: str, i: int) -> bool:
+    return 0 < i < len(text) and not text[i - 1].isspace() and not text[i].isspace()
+
+
+def _last_space(text: str, lo: int, hi: int) -> int:
+    """Index of the last whitespace in [lo, hi), or -1."""
+    for i in range(hi - 1, lo - 1, -1):
+        if text[i].isspace():
+            return i
+    return -1
+
+
+def _next_word_start(text: str, lo: int, hi: int) -> int:
+    """`lo`, moved forward out of the word it lands in; `hi` if [lo, hi) is one word.
+
+    Returning a whitespace index is fine: every piece is stripped.
+    """
+    if not _mid_word(text, lo):
+        return lo
+    for i in range(lo, hi):
+        if text[i].isspace():
+            return i
+    return hi
+
+
 def _split_with_overlap(text: str, max_chars: int, overlap: int) -> list[str]:
-    """Break oversized text, preferring paragraph then line boundaries."""
+    """Break oversized text, preferring paragraph, then line, then word boundaries.
+
+    A piece is cut mid-word only when its window's tail holds no whitespace (a long
+    URL, CJK). The overlap starts on a word boundary too, so it can run short of
+    `overlap`; slicing is by code point, so a combining mark can still be split.
+    """
     if len(text) <= max_chars:
         return [text]
 
@@ -123,6 +153,8 @@ def _split_with_overlap(text: str, max_chars: int, overlap: int) -> list[str]:
             boundary = text.rfind("\n\n", earliest, end)
             if boundary == -1:
                 boundary = text.rfind("\n", earliest, end)
+            if boundary == -1 and _mid_word(text, end):
+                boundary = _last_space(text, earliest, end)
             if boundary > start:
                 end = boundary
 
@@ -134,7 +166,7 @@ def _split_with_overlap(text: str, max_chars: int, overlap: int) -> list[str]:
             break
         # max(..., start + 1) guarantees forward progress even if overlap >= the
         # window we just consumed.
-        start = max(end - overlap, start + 1)
+        start = max(_next_word_start(text, end - overlap, end), start + 1)
 
     return pieces
 
