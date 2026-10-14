@@ -506,6 +506,7 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
     """Run the retrieval eval suite and write a JSON report.
 
     Retrieval only - nothing is generated. Costs one embedded text per question.
+    Exits 1 if any scored check (text, project or lure) fails.
     """
     config = _load_config_or_fail(ctx)
     index_dir = Path(ctx.obj.get("index_dir", DEFAULT_INDEX_DIR))
@@ -558,6 +559,12 @@ def run_eval_command(ctx: click.Context, fixture: Path | None, out_dir: Path | N
         json.dumps(report_to_dict(report), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     click.echo(f"Report: {destination}")
+
+    # After the report is written: a failing run is the one worth reading.
+    if summary["failed"]:
+        noun = "question" if summary["failed"] == 1 else "questions"
+        click.echo(f"{summary['failed']} scored {noun} failed.")
+        sys.exit(1)
 
 
 def _gemini_generator(config: Config) -> Generator:

@@ -151,7 +151,8 @@ sbs eval                         # writes data/eval/retrieval-v2-<timestamp>.jso
 
 - `search`: `-k` 1–50, default 5. `--project` matches the project name in any case.
 - `ask`: `-k` 1–50, default 10; `--project`; `--show-context` also prints every passage retrieved.
-- `eval`: `--fixture` (default `eval/retrieval_v2.toml`), `--out`, `-k` (default 10).
+- `eval`: `--fixture` (default `eval/retrieval_v2.toml`), `--out`, `-k` (default 10). Exits 1
+  if any scored check fails, after writing the report.
 
 Cost per command: `search` uses 1 embedding, `ask` uses 1 embedding plus 1 generation, and
 `eval` uses 1 embedding per question.

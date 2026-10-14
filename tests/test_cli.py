@@ -738,7 +738,7 @@ def test_eval_output_names_the_verdict_check_and_reason(tmp_path: Path, knowledg
         factory=keyword_factory,
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output  # fact-miss fails
     line = {q: next(l for l in result.output.splitlines() if l.strip().startswith(q))
             for q in ("fact-hit", "fact-miss", "by-project", "trap")}
     assert "PASS" in line["fact-hit"] and "text" in line["fact-hit"]
@@ -792,6 +792,96 @@ def test_eval_output_shows_whether_each_lure_reached_the_context(
     assert "1 of 2 scored questions passed" in result.output
     assert "lure 1/2" in result.output
     assert "2 traps" in result.output
+
+
+
+# --- exit status: a failed check fails the run -------------------------------------
+
+FAILING_CHECK = {
+    "text": """
+[[question]]
+id = "fails"
+category = "exact-fact"
+text = "caching redis ttl"
+expected_projects = ["Watch Tracker"]
+expected_text = ["memcached"]
+""",
+    "project": """
+[[question]]
+id = "fails"
+category = "cross-project"
+text = "caching redis ttl"
+expected_projects = ["Nonexistent Project"]
+""",
+    "lure": """
+[[question]]
+id = "fails"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "docker compose"
+""",
+}
+
+PASSING = """
+[[question]]
+id = "passes"
+category = "cross-project"
+text = "caching redis ttl"
+expected_projects = ["Watch Tracker"]
+"""
+
+LURE_HIT = """
+[[question]]
+id = "lure-hit"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+lure_project = "RDBMS"
+lure_text = "write ahead log"
+"""
+
+UNSCORED_TRAP = """
+[[question]]
+id = "trap"
+category = "trap"
+text = "kubernetes helm pods"
+expected_projects = []
+"""
+
+
+@pytest.mark.parametrize("check", sorted(FAILING_CHECK))
+def test_eval_exits_1_when_any_check_fails(tmp_path: Path, knowledge: Path, check: str) -> None:
+    """So a script or CI step can't miss a failure - a lure that dropped out included."""
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    suite = tmp_path / "suite.toml"
+    suite.write_text("version = 2\n" + PASSING + FAILING_CHECK[check], encoding="utf-8")
+    out = tmp_path / "r"
+
+    result = run(["eval", "--fixture", str(suite), "--out", str(out)],
+                 scan_root=knowledge, index_dir=index_dir, factory=keyword_factory)
+
+    assert result.exit_code == 1, result.output
+    assert "1 of 2 scored questions passed" in result.output
+    assert "1 scored question failed" in result.output
+    # The report is still written: a failing run is the one worth reading.
+    (report,) = out.glob("*.json")
+    assert json.loads(report.read_text(encoding="utf-8"))["summary"]["failed"] == 1
+
+
+def test_eval_exits_0_when_every_scored_check_passes(tmp_path: Path, knowledge: Path) -> None:
+    """Unscored traps never fail a run; a lure that reached the context passes."""
+    index_dir = indexed_knowledge(tmp_path, knowledge)
+    suite = tmp_path / "suite.toml"
+    suite.write_text("version = 2\n" + PASSING + LURE_HIT + UNSCORED_TRAP, encoding="utf-8")
+
+    result = run(["eval", "--fixture", str(suite), "--out", str(tmp_path / "r")],
+                 scan_root=knowledge, index_dir=index_dir, factory=keyword_factory)
+
+    assert result.exit_code == 0, result.output
+    assert "2 of 2 scored questions passed" in result.output
+    assert "failed" not in result.output
 
 
 # --- failure wording ------------------------------------------------------------
