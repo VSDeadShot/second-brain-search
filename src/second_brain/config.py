@@ -12,7 +12,7 @@ import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dotenv import dotenv_values
 
@@ -149,16 +149,19 @@ def _typed_value(table: str, key: str, value: object, kind: str, filename: str) 
     raise ConfigError(f"{filename}: [{table}].{key} must be {_EXPECTED[kind]}")
 
 
+def _parse_toml(path: Path) -> dict[str, Any]:
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
+
+
 def _read_overrides(path: Path) -> dict[str, Any]:
     """Config fields set by one TOML file - only the keys it actually contains."""
     if not path.is_file():
         return {}
 
-    try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path.name} is not valid TOML: {exc}") from exc
-
+    raw = _parse_toml(path)
     values: dict[str, Any] = {}
     discovery_keys = (*_LIST_FIELDS, "exclude_projects")
     for key, value in _table(raw, "discovery", discovery_keys, path.name).items():
@@ -226,3 +229,123 @@ def load_config(
             config = replace(config, **overrides)
 
     return config
+
+
+# --- [scan] - read only by scripts/prepush_scan.py ----------------------------------
+#
+# Deliberately not part of Config: load_config never reads [scan], so the leak check's
+# settings cannot change what is indexed, discovered or served over MCP.
+
+_SCAN_KEYS = ("private_terms", "accepted")
+_ACCEPTED_KEYS = ("file", "match", "count", "note")
+_ACCEPTED_REQUIRED = ("file", "match", "count")
+
+# Config fields whose values are private, so the scan looks for them too.
+_PRIVATE_CONFIG_FIELDS = (
+    "git_author_emails",
+    "git_author_names",
+    "discovery_exclude_projects",
+    "mcp_exclude_projects",
+)
+
+
+@dataclass(frozen=True)
+class AcceptedHit:
+    """A scan hit the owner has accepted: `count` lines of `file` may carry `match`."""
+
+    file: str
+    match: str
+    count: int
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class ScanSettings:
+    private_terms: tuple[str, ...]
+    # The private values the other tables already hold (authors, excluded projects).
+    config_terms: tuple[str, ...]
+    accepted: tuple[AcceptedHit, ...] = ()
+
+
+def _non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _accepted_entries(value: object, filename: str) -> tuple[AcceptedHit, ...]:
+    # Refusals give the entry's position, never its text - the match may be a private term.
+    if not isinstance(value, list):
+        raise ConfigError(f"{filename}: [scan].accepted must be a list of tables")
+
+    entries: list[AcceptedHit] = []
+    seen: set[tuple[str, str]] = set()
+    for position, entry in enumerate(value, 1):
+        where = f"{filename}: [scan].accepted entry {position}"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table")
+        unknown = sorted(set(entry) - set(_ACCEPTED_KEYS))
+        if unknown:
+            raise ConfigError(
+                f"{where}: unknown key(s): {', '.join(unknown)}. "
+                f"Valid keys are: {', '.join(_ACCEPTED_KEYS)}"
+            )
+        missing = [key for key in _ACCEPTED_REQUIRED if key not in entry]
+        if missing:
+            raise ConfigError(f"{where} is missing: {', '.join(missing)}")
+        for key in ("file", "match"):
+            if not _non_empty_string(entry[key]):
+                raise ConfigError(f"{where}: {key} must be a non-empty string")
+        count = entry["count"]
+        # bool is an int subclass, so `true` has to be refused explicitly here.
+        if not (isinstance(count, int) and not isinstance(count, bool) and count > 0):
+            raise ConfigError(f"{where}: count must be a positive integer")
+        note = entry.get("note", "")
+        if not isinstance(note, str):
+            raise ConfigError(f"{where}: note must be a string")
+
+        # Matching is case-insensitive, so two entries differing only in case collide.
+        key = (entry["file"], entry["match"].lower())
+        if key in seen:
+            raise ConfigError(f"{where} repeats an earlier entry's file and match")
+        seen.add(key)
+        entries.append(AcceptedHit(file=entry["file"], match=entry["match"], count=count, note=note))
+    return tuple(entries)
+
+
+def read_scan_settings(project_root: Path | None = None) -> ScanSettings:
+    """The pre-push scan's settings, from config.local.toml only.
+
+    Fails closed: a missing file, [scan] table or private_terms key is refused rather
+    than scanning with no terms. `private_terms = []` is allowed.
+    """
+    root = (project_root or _repo_root()).resolve()
+    path = root / "config.local.toml"
+    if not path.is_file():
+        raise ConfigError(
+            "config.local.toml not found. The pre-push scan reads [scan] private_terms from it."
+        )
+
+    raw = _parse_toml(path)
+    if "scan" not in raw:
+        raise ConfigError(f"{path.name}: [scan] is not set. Add [scan] private_terms = [...] to it.")
+    table = _table(raw, "scan", _SCAN_KEYS, path.name)
+    if "private_terms" not in table:
+        raise ConfigError(f"{path.name}: [scan].private_terms is not set ([] scans for none).")
+    terms = cast(
+        tuple[str, ...],
+        _typed_value("scan", "private_terms", table["private_terms"], "strings", path.name),
+    )
+    for position, term in enumerate(terms, 1):
+        if not term.strip():
+            # A blank term would match every line.
+            raise ConfigError(f"{path.name}: [scan].private_terms entry {position} is blank")
+
+    overrides = _read_overrides(path)
+    config_terms: list[str] = []
+    for field_name in _PRIVATE_CONFIG_FIELDS:
+        config_terms.extend(v for v in overrides.get(field_name) or () if v.strip())
+
+    return ScanSettings(
+        private_terms=terms,
+        config_terms=tuple(dict.fromkeys(config_terms)),
+        accepted=_accepted_entries(table.get("accepted", []), path.name),
+    )

@@ -377,3 +377,32 @@ def test_committed_config_leaves_index_time_exclusions_unset() -> None:
     raw = tomllib.loads(committed.read_text(encoding="utf-8"))
 
     assert "exclude_projects" not in raw["discovery"]
+
+
+# --- [scan] - read only by the pre-push scan ----------------------------------------
+
+
+def test_a_scan_table_does_not_change_the_loaded_config(tmp_path: Path) -> None:
+    """The leak check's settings never reach Config, so they cannot change what is indexed."""
+    env = _scan(tmp_path)
+    base_body = '[discovery]\nexclude_projects = []\n[git]\nauthor_emails = ["me@example.com"]\n'
+    write_toml(tmp_path / "config.local.toml", base_body)
+    base = load_config(project_root=tmp_path, env=env)
+
+    write_toml(
+        tmp_path / "config.local.toml",
+        base_body + '[scan]\nprivate_terms = ["Alicia"]\nnot_a_scan_key = 1\n'
+        'accepted = [{ file = "SPEC.md", match = "Alicia", count = 1 }]\n',
+    )
+
+    assert load_config(project_root=tmp_path, env=env) == base
+
+
+def test_committed_config_has_no_scan_table() -> None:
+    """Private terms belong only in the gitignored config.local.toml."""
+    import tomllib
+
+    committed = Path(__file__).resolve().parents[1] / "config.toml"
+    raw = tomllib.loads(committed.read_text(encoding="utf-8"))
+
+    assert "scan" not in raw
