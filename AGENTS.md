@@ -8,10 +8,12 @@ Rules for the coding agent (Claude Code) working on this project.
 - Pre-push scans and git push are always separate commands; push only after reading the scan
   result. Any file a commit names from another project must be confirmed tracked on that repo's
   public branch.
-- Every pre-push scan also scans the whole tracked tree at HEAD, not just the commit's diff and
-  message, for local paths, drive paths and personal terms (the owner's names and username, and
-  every `config.local.toml` value). Report each hit by file and line; the owner decides any new
-  one. A diff-only scan never re-checks files committed before the scan existed.
+- Every pre-push scan covers the whole tracked tree at HEAD and every unpushed commit
+  (origin/main..HEAD: each message and the lines it adds), for local paths, drive paths, Google
+  API keys and personal terms (the owner's names and username, and every `config.local.toml`
+  value). Report each hit by file and line; the owner decides any new one. A diff-only scan
+  never re-checks files committed before the scan existed, and a term added and later removed
+  in unpushed commits is still published by the push - rewrite those commits.
   `python scripts/prepush_scan.py` does this; the private terms and accepted hits live in
   `[scan]` in config.local.toml. The scan reads text only, so check images and screenshots by
   eye before committing them.

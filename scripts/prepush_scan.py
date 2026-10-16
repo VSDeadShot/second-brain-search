@@ -1,19 +1,29 @@
-"""Pre-push leak check over the whole tracked tree (see AGENTS.md).
+"""Pre-push leak check over the whole tracked tree and every unpushed commit (see AGENTS.md).
 
 Scans every tracked file at a commit (HEAD by default), not just the commit's diff, for
-private terms, drive and home paths, and email addresses. Private terms come only from
-the gitignored config.local.toml: [scan] private_terms plus the private values its other
-tables already hold (authors, excluded projects). Output names files, lines and term
-numbers - never a term's text; a term inside a printed path is masked as [term #i].
+private terms, drive and home paths, email addresses and Google API keys. It then scans
+every unpushed commit (origin/main..HEAD by default): each message, and the lines each
+commit adds against its own parent - never the range's net diff, so a term added in one
+commit and removed in a later one still fails. Private terms come only from the gitignored
+config.local.toml: [scan] private_terms plus the private values its other tables already
+hold (authors, excluded projects). Output names files, lines and term numbers - never a
+term's text; a term inside a printed path is masked as [term #i]; a key is never printed.
 
 Hits the owner has accepted are listed in [scan] accepted; each entry must match exactly
-its `count` lines, so a new occurrence or a stale entry fails. Emails on reserved
-placeholder domains are counted, not failed. Binary files (images, screenshots) are
-listed but not read - check them by eye.
+its `count` lines, so a new occurrence or a stale entry fails. In a commit, an added line
+is accepted only if that commit's version of the file still matches the entry's count.
+Accepted entries never cover a commit message or a key. Emails on reserved placeholder
+domains are counted, not failed. Binary files (images, screenshots) are listed but not
+read - check them by eye. A merge commit's message is scanned but not its diff: the
+merged commits are scanned themselves, so only a conflict resolution goes unread.
 
-Exit codes: 0 nothing new; 1 a new hit or a stale accepted entry; 2 config or git error.
+The script never fetches: an unpushed commit cannot be on origin/main, so a stale
+origin/main only means some pushed commits are scanned again.
 
-    python scripts/prepush_scan.py [--rev REV | --worktree] [--ignore-accepted]
+Exit codes: 0 nothing new; 1 a new hit or a stale accepted entry; 2 config or git error
+(including a missing upstream ref).
+
+    python scripts/prepush_scan.py [--rev REV | --worktree] [--upstream REF] [--ignore-accepted]
 """
 
 from __future__ import annotations
@@ -23,7 +33,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from second_brain.config import AcceptedHit, ConfigError, read_scan_settings
@@ -34,7 +44,11 @@ GENERIC: dict[str, re.Pattern[str]] = {
     # Not after ':' - a drive-letter path into a Users folder is already a drive path.
     "home path": re.compile(rf"(?<![\w:.])(?:/home/|/Users/){_PATH_CHARS}+"),
     "email": re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
+    # Same shape as second_brain.git_history's Google key pattern - the project's real secret.
+    "google api key": re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
 }
+# Never accepted, never printed.
+_SECRET_KINDS = frozenset({"google api key"})
 # Reserved for documentation and testing (RFC 2606, 6761, 6762) - never a real mailbox.
 _PLACEHOLDER_EMAIL = re.compile(
     r"@(?:[\w-]+\.)*(?:example\.(?:com|org|net)|[\w-]+\.(?:invalid|test|local|localhost|example))$",
@@ -51,6 +65,7 @@ class Hit:
     kind: str
     text: str  # what matched - compared with accepted entries, never printed for a term
     shown: str = ""  # printed after the kind; terms inside it are masked
+    commit: str = ""  # short hash for a commit hit; "" = the tree. file "" = the message
 
 
 @dataclass(frozen=True)
@@ -119,6 +134,9 @@ def scan_line(file: str, number: int, line: str, terms: Terms) -> list[Hit]:
     for kind, pattern in GENERIC.items():
         for match in pattern.finditer(line):
             text = match.group(0)
+            if kind in _SECRET_KINDS:
+                hits.append(Hit(file, number, kind, text, f"'{text[:4]}...' ({len(text)} chars)"))
+                continue
             if kind == "email" and _PLACEHOLDER_EMAIL.search(text):
                 kind_shown = "placeholder email"
             else:
@@ -149,7 +167,8 @@ def classify(
     """(new, accepted with note, stale entries as (position, entry, lines found))."""
     by_key: dict[tuple[str, str], list[Hit]] = {}
     for hit in hits:
-        by_key.setdefault((hit.file, hit.text.lower()), []).append(hit)
+        if hit.kind not in _SECRET_KINDS:
+            by_key.setdefault((hit.file, hit.text.lower()), []).append(hit)
 
     accepted_hits: list[tuple[Hit, str]] = []
     covered: set[int] = set()
@@ -167,8 +186,129 @@ def classify(
     return new, accepted_hits, stale
 
 
+# --- unpushed commits -----------------------------------------------------------------
+
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+@dataclass(frozen=True)
+class CommitScan:
+    short: str
+    hits: list[Hit]  # message hits have file ""
+    binary: list[str]
+    merge: bool
+
+
+def _diff_path(raw: str) -> str:
+    path = raw.strip()
+    if path.startswith('"') and path.endswith('"'):  # git quotes paths with odd characters
+        path = path[1:-1]
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+def _scan_file_block(block: list[str], short: str, terms: Terms) -> tuple[list[Hit], str | None]:
+    """Hits on one file's added lines (and its name, if new or renamed), and its path if binary."""
+    header = block[0]
+    path = header.rsplit(" b/", 1)[-1] if " b/" in header else ""
+    new_name = False
+    binary: str | None = None
+    hits: list[Hit] = []
+    line_no = 0
+    in_hunks = False  # before the first hunk, "+++ " is a header, not an added line
+    for raw in block[1:]:
+        hunk = _HUNK.match(raw)
+        if hunk:
+            in_hunks = True
+            line_no = int(hunk.group(1))
+        elif not in_hunks:
+            if raw.startswith("new file mode"):
+                new_name = True
+            elif raw.startswith(("rename to ", "copy to ")):
+                new_name = True
+                path = raw.split(" to ", 1)[1]
+            elif raw.startswith("+++ ") and raw != "+++ /dev/null":
+                path = _diff_path(raw[4:])
+            elif raw.startswith("Binary files "):
+                target = raw[len("Binary files ") :].rsplit(" and ", 1)[-1].removesuffix(" differ")
+                if target != "/dev/null":
+                    path = _diff_path(target)
+                    binary = path
+        elif raw.startswith("+"):
+            hits.extend(replace(h, commit=short) for h in scan_line(path, line_no, raw[1:], terms))
+            line_no += 1
+    if new_name:
+        hits.extend(
+            Hit(path, 0, f"term #{index} in file name", path[start:end], commit=short)
+            for start, end, index in terms.spans(path)
+        )
+    return hits, binary
+
+
+def scan_commit(repo: Path, sha: str, terms: Terms) -> CommitScan:
+    """One commit's message, and the lines it adds against its own parent."""
+    short = sha[:7]
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", sha).decode().split()[1:]
+    message = _git(repo, "log", "-1", "--format=%B", sha).decode("utf-8", errors="replace")
+    hits = [
+        replace(hit, commit=short)
+        for number, line in enumerate(message.splitlines(), 1)
+        for hit in scan_line("", number, line, terms)
+    ]
+    if len(parents) > 1:
+        return CommitScan(short, hits, [], merge=True)
+
+    diff = _git(
+        repo, "-c", "core.quotePath=false", "diff-tree", "-p", "-M", "-U0",
+        "--no-color", "--no-ext-diff", "--root", "--no-commit-id", sha,
+    ).decode("utf-8", errors="replace")
+    blocks: list[list[str]] = []
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git "):
+            blocks.append([raw])
+        elif blocks:
+            blocks[-1].append(raw)
+    binary: list[str] = []
+    for block in blocks:
+        block_hits, binary_path = _scan_file_block(block, short, terms)
+        hits.extend(block_hits)
+        if binary_path is not None:
+            binary.append(binary_path)
+    return CommitScan(short, hits, binary, merge=False)
+
+
+def classify_commit(
+    repo: Path, sha: str, hits: Sequence[Hit], accepted: Sequence[AcceptedHit], terms: Terms
+) -> tuple[list[Hit], list[tuple[Hit, str]]]:
+    """(new, accepted with note). An added line is accepted only if that commit's version
+    of the file still matches the entry's count; a message or a key never is."""
+    entries = {(entry.file, entry.match.lower()): entry for entry in accepted}
+    lines_at: dict[tuple[str, str], int] = {}
+    new: list[Hit] = []
+    accepted_hits: list[tuple[Hit, str]] = []
+    for hit in hits:
+        key = (hit.file, hit.text.lower())
+        entry = entries.get(key)
+        if hit.file == "" or hit.kind in _SECRET_KINDS or entry is None:
+            new.append(hit)
+            continue
+        if key not in lines_at:
+            blob = TrackedFile(hit.file, _git(repo, "show", f"{sha}:{hit.file}"))
+            lines_at[key] = len(
+                {h.line for h in scan([blob], terms)[0] if (h.file, h.text.lower()) == key}
+            )
+        if lines_at[key] == entry.count:
+            accepted_hits.append((hit, entry.note))
+        else:
+            new.append(hit)
+    return new, accepted_hits
+
+
 def _location(hit: Hit, terms: Terms) -> str:
+    if hit.commit and hit.file == "":
+        return f"{hit.commit} message:{hit.line}"
     name = terms.mask(hit.file)
+    if hit.commit:
+        name = f"{hit.commit} +{name}"
     return name if hit.line == 0 else f"{name}:{hit.line}"
 
 
@@ -181,6 +321,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     where = parser.add_mutually_exclusive_group()
     where.add_argument("--rev", default="HEAD", help="commit to scan (default HEAD)")
     where.add_argument("--worktree", action="store_true", help="scan tracked files on disk instead")
+    parser.add_argument(
+        "--upstream", default="origin/main", help="commits after this are unpushed (default origin/main)"
+    )
     parser.add_argument(
         "--ignore-accepted", action="store_true", help="report accepted hits as new (positive control)"
     )
@@ -198,15 +341,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     terms = Terms(all_terms)
 
     rev = None if args.worktree else args.rev
+    end = rev or "HEAD"  # the unpushed range ends here
     commit = b""
     try:
         if rev is not None:
             commit = _git(args.repo, "rev-parse", "--verify", "-q", f"{rev}^{{commit}}")
         files = tracked_files(args.repo, rev)
+        end_sha = _git(args.repo, "rev-parse", "--verify", "-q", f"{end}^{{commit}}").decode().strip()
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode("utf-8", errors="replace").strip() if exc.stderr else ""
         print(f"git error: {' '.join(exc.cmd[3:])} failed. {detail}".rstrip(), file=sys.stderr)
         return 2
+    try:
+        upstream_sha = _git(
+            args.repo, "rev-parse", "--verify", "-q", f"{args.upstream}^{{commit}}"
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        # Fails closed: without it there is no telling which commits a push would publish.
+        print(
+            f"git error: upstream {args.upstream} not found - fetch it, or pass --upstream REF.",
+            file=sys.stderr,
+        )
+        return 2
+    counts = _git(args.repo, "rev-list", "--left-right", "--count", f"{end}...{args.upstream}")
+    ahead, behind = (int(n) for n in counts.decode().split())
+    unpushed = _git(args.repo, "rev-list", "--reverse", f"{args.upstream}..{end}").decode().split()
 
     target = "in the working tree" if rev is None else f"at {rev} ({commit.decode().strip()[:7]})"
     print(f"prepush scan: {len(files)} tracked files {target}; {len(all_terms)} private terms")
@@ -229,10 +388,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     for path in binary:
         print(f"  BINARY    {terms.mask(path)}  not scanned - check it by eye")
 
-    failed = bool(new or stale)
+    if not unpushed:
+        where_end = (
+            f"{end} == {args.upstream} {upstream_sha[:7]}" if behind == 0
+            else f"{end} is {behind} behind {args.upstream}"
+        )
+        print(f"commits: 0 unpushed ({where_end}) - nothing to scan")
+    else:
+        print(
+            f"commits: {len(unpushed)} unpushed "
+            f"({args.upstream} {upstream_sha[:7]}..{end} {end_sha[:7]})"
+        )
+        if behind:
+            print(
+                f"  ! diverged: {ahead} ahead, {behind} behind - a plain push will be refused; "
+                "rebased commits get new hashes, so scan again after rebasing"
+            )
+    commit_new: list[Hit] = []
+    commit_accepted: list[tuple[Hit, str]] = []
+    commit_binary: list[tuple[str, str]] = []
+    merges: list[str] = []
+    for sha in unpushed:
+        result = scan_commit(args.repo, sha, terms)
+        placeholders += [hit for hit in result.hits if hit.kind == "placeholder email"]
+        found = [hit for hit in result.hits if hit.kind != "placeholder email"]
+        sha_new, sha_accepted = classify_commit(args.repo, sha, found, accepted, terms)
+        commit_new += sha_new
+        commit_accepted += sha_accepted
+        commit_binary += [(result.short, path) for path in result.binary]
+        if result.merge:
+            merges.append(result.short)
+
+    for hit in commit_new:
+        print(f"  NEW       {_describe(hit, terms)}")
+    for hit, note in commit_accepted:
+        print(f"  ACCEPTED  {_describe(hit, terms)}" + (f"  ({note})" if note else ""))
+    for short, path in commit_binary:
+        print(f"  BINARY    {short} +{terms.mask(path)}  not scanned - check it by eye")
+    for short in merges:
+        print(f"  MERGE     {short}  diff not scanned (message scanned)")
+    if commit_new:
+        print(
+            "  hint: a later commit does not unpublish an earlier one - "
+            "rewrite the unpushed commits"
+        )
+
+    all_new = len(new) + len(commit_new)
+    failed = bool(all_new or stale)
     print(
-        f"new {len(new)}, accepted {len(accepted_hits)}, stale {len(stale)}, "
-        f"placeholder emails {len(placeholders)}, binary not scanned {len(binary)}"
+        f"new {all_new}, accepted {len(accepted_hits) + len(commit_accepted)}, "
+        f"stale {len(stale)}, placeholder emails {len(placeholders)}, "
+        f"binary not scanned {len(binary) + len(commit_binary)}, commits scanned {len(unpushed)}"
         f" -> {'FAIL' if failed else 'OK'}"
     )
     return 1 if failed else 0
